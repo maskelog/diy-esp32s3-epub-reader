@@ -9,3 +9,5 @@ spiffs-paper-s3.bin
 releases/
 
 components/epdiy/.git/
+firmware.elf
+m5book/
