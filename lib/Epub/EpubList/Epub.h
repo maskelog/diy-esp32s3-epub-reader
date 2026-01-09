@@ -2,6 +2,7 @@
 
 #include <string>
 #include <vector>
+#include <cstring>
 #include <unordered_map>
 #ifndef UNIT_TEST
   #include <freertos/FreeRTOS.h>

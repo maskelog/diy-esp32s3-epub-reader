@@ -257,17 +257,22 @@ public:
   }
   virtual int get_line_height()
   {
-  #ifdef USE_FREETYPE
+    int base_height = 0;
+#ifdef USE_FREETYPE
     if (m_freetype_enabled && m_freetype_font && m_freetype_font->is_valid())
     {
-      return m_freetype_font->get_line_height();
+      base_height = m_freetype_font->get_line_height();
     }
-  #endif
-    if (!m_regular_font)
+#endif
+    if (base_height == 0)
     {
-      return 0;
+      if (!m_regular_font)
+      {
+        return 0;
+      }
+      base_height = m_regular_font->advance_y;
     }
-    return m_regular_font->advance_y;
+    return apply_line_spacing(base_height);
   }
 
   // dehydate a frame buffer to file

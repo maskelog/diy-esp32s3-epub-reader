@@ -4563,7 +4563,7 @@ static int mz_stat64(const char *path, struct __stat64 *buffer)
         void *pRead_buf;
         mz_uint32 local_header_u32[(MZ_ZIP_LOCAL_DIR_HEADER_SIZE + sizeof(mz_uint32) - 1) / sizeof(mz_uint32)];
         mz_uint8 *pLocal_header = (mz_uint8 *)local_header_u32;
-        tinfl_decompressor inflator;
+        tinfl_decompressor *inflator = NULL;
 
         if ((!pZip) || (!pZip->m_pState) || ((buf_size) && (!pBuf)) || ((user_read_buf_size) && (!pUser_read_buf)) || (!pZip->m_pRead))
             return mz_zip_set_error(pZip, MZ_ZIP_INVALID_PARAMETER);
@@ -4622,7 +4622,10 @@ static int mz_stat64(const char *path, struct __stat64 *buffer)
         }
 
         /* Decompress the file either directly from memory or from a file input buffer. */
-        tinfl_init(&inflator);
+        inflator = (tinfl_decompressor *)pZip->m_pAlloc(pZip->m_pAlloc_opaque, 1, sizeof(tinfl_decompressor));
+        if (NULL == inflator)
+            return mz_zip_set_error(pZip, MZ_ZIP_ALLOC_FAILED);
+        tinfl_init(inflator);
 
         if (pZip->m_pState->m_pMem)
         {
@@ -4673,7 +4676,7 @@ static int mz_stat64(const char *path, struct __stat64 *buffer)
                 read_buf_ofs = 0;
             }
             in_buf_size = (size_t)read_buf_avail;
-            status = tinfl_decompress(&inflator, (mz_uint8 *)pRead_buf + read_buf_ofs, &in_buf_size, (mz_uint8 *)pBuf, (mz_uint8 *)pBuf + out_buf_ofs, &out_buf_size, TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF | (comp_remaining ? TINFL_FLAG_HAS_MORE_INPUT : 0));
+            status = tinfl_decompress(inflator, (mz_uint8 *)pRead_buf + read_buf_ofs, &in_buf_size, (mz_uint8 *)pBuf, (mz_uint8 *)pBuf + out_buf_ofs, &out_buf_size, TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF | (comp_remaining ? TINFL_FLAG_HAS_MORE_INPUT : 0));
             read_buf_avail -= in_buf_size;
             read_buf_ofs += in_buf_size;
             out_buf_ofs += out_buf_size;
@@ -4698,6 +4701,7 @@ static int mz_stat64(const char *path, struct __stat64 *buffer)
 
         if ((!pZip->m_pState->m_pMem) && (!pUser_read_buf))
             pZip->m_pFree(pZip->m_pAlloc_opaque, pRead_buf);
+        pZip->m_pFree(pZip->m_pAlloc_opaque, inflator);
 
         return status == TINFL_STATUS_DONE;
     }

@@ -24,10 +24,33 @@ protected:
   int margin_left = 0;
   int margin_right = 0;
   bool image_placeholder_enabled = true;
+  int line_spacing_percent = 100;
+
+  int apply_line_spacing(int base_height) const
+  {
+    if (base_height <= 0)
+    {
+      return base_height;
+    }
+    return (base_height * line_spacing_percent + 50) / 100;
+  }
 
 public:
   virtual ~Renderer();
   void set_image_placeholder_enabled(bool enabled) { image_placeholder_enabled = enabled; }
+  void set_line_spacing_percent(int percent)
+  {
+    if (percent < 80)
+    {
+      percent = 80;
+    }
+    else if (percent > 200)
+    {
+      percent = 200;
+    }
+    line_spacing_percent = percent;
+  }
+  int get_line_spacing_percent() const { return line_spacing_percent; }
   virtual void draw_image(const std::string &filename, const uint8_t *data, size_t data_size, int x, int y, int width, int height);
   virtual bool get_image_size(const std::string &filename, const uint8_t *data, size_t data_size, int *width, int *height);
   virtual void draw_pixel(int x, int y, uint8_t color) = 0;

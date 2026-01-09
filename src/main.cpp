@@ -1,14 +1,4 @@
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-#include <freertos/queue.h>
-#include <esp_sleep.h>
-#include <esp_timer.h>
-#include <esp_system.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <dirent.h>
-#include <ctype.h>
-#include <esp_random.h>
+#include <Arduino.h>
 #include "config.h"
 #include "EpubList/Epub.h"
 #include "EpubList/EpubList.h"
@@ -16,57 +6,19 @@
 #include "EpubList/EpubToc.h"
 #include <RubbishHtmlParser/RubbishHtmlParser.h>
 #include "boards/Board.h"
-#include "boards/controls/PaperS3TouchControls.h"
+#include "boards/controls/M5PaperButtonControls.h"
+#include "boards/controls/M5PaperTouchControls.h"
 
 #ifdef USE_FREETYPE
-#include "Renderer/EpdiyFrameBufferRenderer.h"
 #include "Renderer/FreeTypeFont.h"
-
-#if defined(BOARD_TYPE_PAPER_S3)
-// Global FreeType font instance used by the Paper S3 renderer.
-static FreeTypeFont *g_paper_s3_ft_font = nullptr;
-
-static void init_freetype_for_paper_s3(Renderer *renderer)
-{
-  if (g_paper_s3_ft_font)
-  {
-    return;
-  }
-
-  auto *epd_renderer = static_cast<EpdiyFrameBufferRenderer *>(renderer);
-  if (!epd_renderer)
-  {
-    return;
-  }
-
-  g_paper_s3_ft_font = new FreeTypeFont();
-  // Use a fixed pixel height similar to the original bitmap fonts.
-  int pixel_height = 22;
-  if (!g_paper_s3_ft_font->init("/fs/fonts/reader.ttf", pixel_height))
-  {
-    delete g_paper_s3_ft_font;
-    g_paper_s3_ft_font = nullptr;
-    return;
-  }
-
-  epd_renderer->set_freetype_font_for_reading(g_paper_s3_ft_font);
-  epd_renderer->set_freetype_enabled(true);
-}
-#endif // BOARD_TYPE_PAPER_S3
-#endif // USE_FREETYPE
+#endif
 
 #ifdef LOG_ENABLED
-// Reference: https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/system/log.html
 #define LOG_LEVEL ESP_LOG_INFO
 #else
 #define LOG_LEVEL ESP_LOG_NONE
 #endif
 #include <esp_log.h>
-
-extern "C"
-{
-  void app_main();
-}
 
 const char *TAG = "main";
 
@@ -78,26 +30,17 @@ typedef enum
   READING_MENU
 } UIState;
 
-// Default UI state: show the EPUB list on startup. We no longer store this in
-// RTC slow memory; EPUB metadata and selection are persisted via /fs/books_index.bin.
 UIState ui_state = SELECTING_EPUB;
-// State data for the EPUB list and reader.
 EpubListState epub_list_state = {};
-// State data for the EPUB index list.
 EpubTocState epub_index_state = {};
 
-// Whether the KOReader-style status bar (title, progress, battery)
-// is currently visible. Toggled via a long-press gesture while
-// reading.
 bool status_bar_visible = true;
-
-// User-configurable behaviour flags.
 bool open_last_book_on_startup = true;
 bool invert_tap_zones = false;
 bool justify_paragraphs = false;
 
 const int READER_MENU_BASIC_ITEMS = 6;
-const int READER_MENU_ADVANCED_ITEMS = 10;
+const int READER_MENU_ADVANCED_ITEMS = 12;
 
 typedef enum
 {
@@ -129,9 +72,17 @@ typedef enum
   GESTURE_SENS_HIGH = 2
 } GestureSensitivity;
 
+typedef enum
+{
+  LINE_SPACING_100 = 0,
+  LINE_SPACING_120 = 1,
+  LINE_SPACING_140 = 2
+} LineSpacingProfile;
+
 IdleProfile idle_profile = IDLE_PROFILE_NORMAL;
 MarginProfile margin_profile = MARGIN_PROFILE_NORMAL;
 GestureSensitivity gesture_sensitivity = GESTURE_SENS_MEDIUM;
+LineSpacingProfile line_spacing_profile = LINE_SPACING_100;
 
 int64_t idle_timeout_reading_us = 60 * 1000 * 1000;
 int64_t idle_timeout_library_us = 60 * 1000 * 1000;
@@ -148,18 +99,22 @@ typedef struct
 #endif
 } AppSettings;
 
-static const char *app_settings_path = "/fs/settings.bin";
+static const char *app_settings_path = "/settings.bin";
 
+void handleEpub(Renderer *renderer, UIAction action);
+void handleEpubList(Renderer *renderer, UIAction action, bool needs_redraw);
+void handleReaderMenu(Renderer *renderer, UIAction action);
+void handleUserInteraction(Renderer *renderer, UIAction ui_action, bool needs_redraw);
+void draw_battery_level(Renderer *renderer, float voltage, float percentage);
+static void show_library_loading(Renderer *renderer);
+static void show_sleep_image(Renderer *renderer);
+static int find_last_open_book_index();
 static void load_app_settings(Renderer *renderer);
 static void save_app_settings(Renderer *renderer);
 static void apply_idle_profile();
 static void apply_page_margins(Renderer *renderer);
 static void apply_gesture_profile();
-static void show_library_loading(Renderer *renderer);
-
-void handleEpub(Renderer *renderer, UIAction action);
-void handleEpubList(Renderer *renderer, UIAction action, bool needs_redraw);
-void handleReaderMenu(Renderer *renderer, UIAction action);
+static void apply_line_spacing_profile(Renderer *renderer);
 static void renderReaderMenu(Renderer *renderer);
 static void show_status_bar_toast(Renderer *renderer, const char *text);
 
@@ -170,6 +125,91 @@ int reader_menu_selected = 0;
 bool reader_menu_advanced = false;
 static bool g_request_sleep_now = false;
 
+Board *board = nullptr;
+Renderer *renderer = nullptr;
+Battery *battery = nullptr;
+ButtonControls *button_controls = nullptr;
+TouchControls *touch_controls = nullptr;
+QueueHandle_t ui_queue = nullptr;
+
+void setup()
+{
+  board = Board::factory();
+  board->power_up();
+
+  renderer = board->get_renderer();
+  board->start_filesystem();
+
+  load_app_settings(renderer);
+
+  battery = board->get_battery();
+  if (battery)
+  {
+    battery->setup();
+  }
+
+  apply_page_margins(renderer);
+
+  ui_queue = xQueueCreate(10, sizeof(UIAction));
+
+  button_controls = board->get_button_controls(ui_queue);
+  touch_controls = board->get_touch_controls(renderer, ui_queue);
+
+  if (button_controls->did_wake_from_deep_sleep())
+  {
+    bool hydrate_success = renderer->hydrate();
+    UIAction ui_action = button_controls->get_deep_sleep_action();
+    handleUserInteraction(renderer, ui_action, !hydrate_success);
+  }
+  else
+  {
+    renderer->reset();
+    show_library_loading(renderer);
+    if (!epub_list)
+    {
+      epub_list = new EpubList(renderer, epub_list_state);
+      epub_list->load("/Books");
+    }
+    if (open_last_book_on_startup)
+    {
+      int last_book_index = find_last_open_book_index();
+      if (last_book_index >= 0)
+      {
+        epub_list_state.selected_item = last_book_index;
+        ui_state = READING_EPUB;
+      }
+    }
+    handleUserInteraction(renderer, NONE, true);
+  }
+
+  if (battery)
+  {
+    draw_battery_level(renderer, battery->get_voltage(), battery->get_percentage());
+  }
+  touch_controls->render(renderer);
+  renderer->flush_display();
+}
+
+void loop()
+{
+  button_controls->run();
+  touch_controls->run();
+
+  UIAction ui_action = NONE;
+  if (xQueueReceive(ui_queue, &ui_action, pdMS_TO_TICKS(10)) == pdTRUE)
+  {
+    if (ui_action != NONE)
+    {
+      handleUserInteraction(renderer, ui_action, false);
+      if (battery)
+      {
+        draw_battery_level(renderer, battery->get_voltage(), battery->get_percentage());
+      }
+      renderer->flush_display();
+    }
+  }
+}
+// All the other functions from the original main.cpp go here
 static int find_last_open_book_index()
 {
   int last_index = -1;
@@ -331,6 +371,7 @@ static void renderReaderMenu(Renderer *renderer)
   char buf_idle[32];
   char buf_margin[32];
   char buf_gest[32];
+  char buf_spacing[32];
 
   if (!reader_menu_advanced)
   {
@@ -426,6 +467,18 @@ static void renderReaderMenu(Renderer *renderer)
     }
     snprintf(buf_gest, sizeof(buf_gest), "Gestures: %s", gest_str);
     labels[9] = buf_gest;
+    int spacing_percent = 100;
+    if (line_spacing_profile == LINE_SPACING_120)
+    {
+      spacing_percent = 120;
+    }
+    else if (line_spacing_profile == LINE_SPACING_140)
+    {
+      spacing_percent = 140;
+    }
+    snprintf(buf_spacing, sizeof(buf_spacing), "Line spacing: %d%%", spacing_percent);
+    labels[10] = buf_spacing;
+    labels[11] = "Save & Back";
   }
 
 #ifdef USE_FREETYPE
@@ -610,11 +663,16 @@ static void renderReaderMenu(Renderer *renderer)
     int w_center = renderer->get_text_width(center, false, false);
     int w_rs = renderer->get_text_width(right_single, true, false);
     int w_rd = renderer->get_text_width(right_double, true, false);
-    if (w_ld < 0) w_ld = 0;
-    if (w_ls < 0) w_ls = 0;
-    if (w_center < 0) w_center = 0;
-    if (w_rs < 0) w_rs = 0;
-    if (w_rd < 0) w_rd = 0;
+    if (w_ld < 0)
+      w_ld = 0;
+    if (w_ls < 0)
+      w_ls = 0;
+    if (w_center < 0)
+      w_center = 0;
+    if (w_rs < 0)
+      w_rs = 0;
+    if (w_rd < 0)
+      w_rd = 0;
 
     int line_h = renderer->get_line_height();
     if (line_h <= 0)
@@ -666,7 +724,8 @@ static void renderReaderMenu(Renderer *renderer)
     renderer->draw_rect(rs_zone_start, box_y, rs_zone_end - rs_zone_start, box_h, 0);
     renderer->draw_rect(rd_zone_start, box_y, rd_zone_end - rd_zone_start, box_h, 0);
 
-    auto center_label_x = [](int zone_start, int zone_end, int text_width) {
+    auto center_label_x = [](int zone_start, int zone_end, int text_width)
+    {
       int w = zone_end - zone_start;
       int x = zone_start + (w - text_width) / 2;
       if (x < zone_start)
@@ -768,9 +827,15 @@ static void load_app_settings(Renderer *renderer)
   gesture_sensitivity = (GestureSensitivity)(s.reserved & 0x3);
   // Bit 2 of reserved stores the paragraph alignment preference.
   justify_paragraphs = (s.reserved & 0x4) != 0;
+  uint8_t spacing_bits = (s.reserved >> 3) & 0x3;
+  if (spacing_bits <= LINE_SPACING_140)
+  {
+    line_spacing_profile = (LineSpacingProfile)spacing_bits;
+  }
   apply_idle_profile();
   apply_page_margins(renderer);
   apply_gesture_profile();
+  apply_line_spacing_profile(renderer);
 }
 
 static void save_app_settings(Renderer *renderer)
@@ -789,7 +854,7 @@ static void save_app_settings(Renderer *renderer)
   {
     s.flags |= 0x4;
   }
-   if (invert_tap_zones)
+  if (invert_tap_zones)
   {
     s.flags |= 0x8;
   }
@@ -808,6 +873,7 @@ static void save_app_settings(Renderer *renderer)
   {
     s.reserved |= 0x4;
   }
+  s.reserved |= (((uint8_t)line_spacing_profile) & 0x3) << 3;
   FILE *fp = fopen(app_settings_path, "wb");
   if (!fp)
   {
@@ -864,21 +930,415 @@ static void apply_page_margins(Renderer *renderer)
 
 static void apply_gesture_profile()
 {
-  int profile = 1;
-  switch (gesture_sensitivity)
+}
+
+static void apply_line_spacing_profile(Renderer *renderer)
+{
+  int spacing_percent = 100;
+  if (line_spacing_profile == LINE_SPACING_120)
   {
-  case GESTURE_SENS_LOW:
-    profile = 0;
+    spacing_percent = 120;
+  }
+  else if (line_spacing_profile == LINE_SPACING_140)
+  {
+    spacing_percent = 140;
+  }
+  renderer->set_line_spacing_percent(spacing_percent);
+}
+
+void handleUserInteraction(Renderer *renderer, UIAction ui_action, bool needs_redraw)
+{
+  // Global handling for status bar toggle while reading.
+  if (ui_action == TOGGLE_STATUS_BAR && ui_state == READING_EPUB)
+  {
+    status_bar_visible = !status_bar_visible;
+    save_app_settings(renderer);
+    // Re-render the current page; draw_battery_level() will
+    // pick up the new visibility on the next flush.
+    handleEpub(renderer, NONE);
+    show_status_bar_toast(renderer, status_bar_visible ? "Status bar ON" : "Status bar OFF");
+    return;
+  }
+
+  // From the library view, allow a gesture (e.g. two-finger swipe up)
+  // to open the reader menu directly, focusing on advanced settings.
+  if (ui_action == OPEN_READER_MENU && ui_state == SELECTING_EPUB)
+  {
+    ui_state = READING_MENU;
+    reader_menu_advanced = true;
+    reader_menu_selected = 0;
+    renderReaderMenu(renderer);
+    return;
+  }
+
+  switch (ui_state)
+  {
+  case READING_MENU:
+    handleReaderMenu(renderer, ui_action);
     break;
-  case GESTURE_SENS_HIGH:
-    profile = 2;
+  case READING_EPUB:
+    if (ui_action == SELECT)
+    {
+      ui_state = READING_MENU;
+      reader_menu_selected = 0;
+      renderReaderMenu(renderer);
+    }
+    else
+    {
+      handleEpub(renderer, ui_action);
+    }
     break;
-  case GESTURE_SENS_MEDIUM:
+  case SELECTING_TABLE_CONTENTS:
+    handleEpubTableContents(renderer, ui_action, needs_redraw);
+    break;
+  case SELECTING_EPUB:
   default:
-    profile = 1;
+    handleEpubList(renderer, ui_action, needs_redraw);
     break;
   }
-  PaperS3TouchControls::set_gesture_profile(profile);
+}
+
+void draw_battery_level(Renderer *renderer, float voltage, float percentage)
+{
+  // If the status bar is hidden, restore full-page content by
+  // removing the reserved top margin and skip drawing any
+  // status elements.
+  if (!status_bar_visible)
+  {
+    renderer->set_margin_top(0);
+    return;
+  }
+
+  // clear the margin so we can draw the battery in the right place
+  renderer->set_margin_top(0);
+  int width = 40;
+  int height = 20;
+  int margin_right = 5;
+  int margin_top = 10;
+  int xpos = renderer->get_page_width() - width - margin_right;
+  int ypos = margin_top;
+  int percent_width = width * percentage / 100;
+  renderer->fill_rect(xpos, ypos, width, height, 255);
+  renderer->fill_rect(xpos + width - percent_width, ypos, percent_width, height, 0);
+  renderer->draw_rect(xpos, ypos, width, height, 0);
+  renderer->fill_rect(xpos - 4, ypos + height / 4, 4, height / 2, 0);
+  // put the margin back
+  renderer->set_margin_top(35);
+}
+
+static void show_library_loading(Renderer *renderer)
+{
+  renderer->clear_screen();
+  int page_width = renderer->get_page_width();
+  int page_height = renderer->get_page_height();
+  int line_height = renderer->get_line_height();
+  if (page_width <= 0 || page_height <= 0 || line_height <= 0)
+  {
+    return;
+  }
+
+  const char *msg = "Book library is loading";
+  int text_width = renderer->get_text_width(msg, false, false);
+  if (text_width < 0)
+  {
+    text_width = 0;
+  }
+
+  int x = (page_width - text_width) / 2;
+  if (x < 0)
+  {
+    x = 0;
+  }
+  int center_y = page_height / 2;
+  int y = center_y - (3 * line_height) / 4;
+
+  renderer->draw_text(x, y, msg, false, false);
+  renderer->flush_display();
+}
+
+static void show_sleep_cover(Renderer *renderer)
+{
+  int book_index = -1;
+  if (epub_list_state.num_epubs > 0)
+  {
+    if (ui_state == READING_EPUB || ui_state == READING_MENU || ui_state == SELECTING_TABLE_CONTENTS)
+    {
+      book_index = epub_list_state.selected_item;
+    }
+    if (book_index < 0)
+    {
+      book_index = find_last_open_book_index();
+    }
+  }
+
+  if (book_index < 0)
+  {
+    return;
+  }
+
+  EpubListItem &item = epub_list_state.epub_list[book_index];
+  if (item.cover_path[0] == '\0')
+  {
+    return;
+  }
+
+  Epub epub(item.path);
+  if (!epub.load())
+  {
+    return;
+  }
+
+  size_t image_data_size = 0;
+  uint8_t *image_data = epub.get_item_contents(item.cover_path, &image_data_size);
+  if (!image_data || image_data_size == 0)
+  {
+    free(image_data);
+    return;
+  }
+
+  int img_w = 0;
+  int img_h = 0;
+  bool can_render = renderer->get_image_size(item.cover_path, image_data, image_data_size, &img_w, &img_h);
+  if (!can_render || img_w <= 0 || img_h <= 0)
+  {
+    free(image_data);
+    return;
+  }
+
+  renderer->set_margin_top(0);
+  renderer->set_margin_bottom(0);
+  renderer->set_margin_left(0);
+  renderer->set_margin_right(0);
+
+  int width = renderer->get_page_width();
+  int height = renderer->get_page_height();
+
+  renderer->clear_screen();
+  renderer->set_image_placeholder_enabled(false);
+  renderer->draw_image(item.cover_path, image_data, image_data_size, 0, 0, width, height);
+  renderer->set_image_placeholder_enabled(true);
+  free(image_data);
+  renderer->flush_display();
+}
+
+static void show_sleep_image(Renderer *renderer)
+{
+  if (sleep_image_mode == SLEEP_IMAGE_OFF)
+  {
+    return;
+  }
+
+  if (sleep_image_mode == SLEEP_IMAGE_COVER)
+  {
+    show_sleep_cover(renderer);
+    return;
+  }
+
+  if (sleep_image_mode != SLEEP_IMAGE_RANDOM)
+  {
+    return;
+  }
+
+  const char *pics_dir = nullptr;
+  DIR *dir = nullptr;
+  const char *candidates[] = {"/sd/pic"};
+  for (int i = 0; i < 1; i++)
+  {
+    dir = opendir(candidates[i]);
+    if (dir)
+    {
+      pics_dir = candidates[i];
+      break;
+    }
+  }
+  if (!dir)
+  {
+    ESP_LOGW("main", "Sleep image directory not found: %s", "/sd/pic");
+    show_sleep_cover(renderer);
+    return;
+  }
+
+  char selected_path[512] = {0};
+  int image_count = 0;
+  struct dirent *ent;
+
+  while ((ent = readdir(dir)) != NULL)
+  {
+    if (ent->d_name[0] == '.' || ent->d_type == DT_DIR)
+    {
+      continue;
+    }
+
+    const char *dot = strrchr(ent->d_name, '.');
+    if (!dot || !dot[1])
+    {
+      continue;
+    }
+    const char *ext = dot + 1;
+    char e0 = tolower(ext[0]);
+    char e1 = tolower(ext[1]);
+    char e2 = tolower(ext[2]);
+    char e3 = tolower(ext[3]);
+
+    bool is_jpg = (e0 == 'j' && e1 == 'p' && e2 == 'g' && ext[3] == '\0');
+    bool is_jpeg = (e0 == 'j' && e1 == 'p' && e2 == 'e' && e3 == 'g' && ext[4] == '\0');
+    bool is_png = (e0 == 'p' && e1 == 'n' && e2 == 'g' && ext[3] == '\0');
+    if (!is_jpg && !is_jpeg && !is_png)
+    {
+      continue;
+    }
+
+    // Reservoir sampling so each image has equal probability.
+    image_count++;
+    if (image_count == 1)
+    {
+      snprintf(selected_path, sizeof(selected_path), "%s/%s", pics_dir, ent->d_name);
+    }
+    else
+    {
+      uint32_t r = esp_random();
+      if (r % (uint32_t)image_count == 0)
+      {
+        snprintf(selected_path, sizeof(selected_path), "%s/%s", pics_dir, ent->d_name);
+      }
+    }
+  }
+  closedir(dir);
+
+  if (image_count == 0 || selected_path[0] == '\0')
+  {
+    ESP_LOGW("main", "No image files found in %s", pics_dir);
+    show_sleep_cover(renderer);
+    return;
+  }
+
+  const char *sleep_image_path = selected_path;
+  FILE *fp = fopen(sleep_image_path, "rb");
+  if (!fp)
+  {
+    ESP_LOGW("main", "Sleep image not found at %s", sleep_image_path);
+    show_sleep_cover(renderer);
+    return;
+  }
+
+  if (fseek(fp, 0, SEEK_END) != 0)
+  {
+    fclose(fp);
+    show_sleep_cover(renderer);
+    return;
+  }
+  long size = ftell(fp);
+  if (size <= 0)
+  {
+    fclose(fp);
+    ESP_LOGW("main", "Sleep image file has invalid size: %s", sleep_image_path);
+    show_sleep_cover(renderer);
+    return;
+  }
+  if (fseek(fp, 0, SEEK_SET) != 0)
+  {
+    fclose(fp);
+    show_sleep_cover(renderer);
+    return;
+  }
+
+  uint8_t *data = (uint8_t *)malloc((size_t)size);
+  if (!data)
+  {
+    fclose(fp);
+    ESP_LOGW("main", "Failed to allocate memory for sleep image");
+    show_sleep_cover(renderer);
+    return;
+  }
+
+  size_t read = fread(data, 1, (size_t)size, fp);
+  fclose(fp);
+  if (read != (size_t)size)
+  {
+    free(data);
+    ESP_LOGW("main", "Failed to read full sleep image");
+    show_sleep_cover(renderer);
+    return;
+  }
+
+  int img_w = 0;
+  int img_h = 0;
+  bool can_render = renderer->get_image_size(sleep_image_path, data, (size_t)size, &img_w, &img_h);
+  if (!can_render || img_w <= 0 || img_h <= 0)
+  {
+    free(data);
+    ESP_LOGW("main", "Sleep image decode failed: %s", sleep_image_path);
+    show_sleep_cover(renderer);
+    return;
+  }
+
+  // Draw full-screen, ignoring margins.
+  renderer->set_margin_top(0);
+  renderer->set_margin_bottom(0);
+  renderer->set_margin_left(0);
+  renderer->set_margin_right(0);
+
+  int width = renderer->get_page_width();
+  int height = renderer->get_page_height();
+
+  renderer->clear_screen();
+  // For sleep images we do not want to show the generic cover placeholder
+  // if decoding fails; just leave the screen as-is in that case.
+  renderer->set_image_placeholder_enabled(false);
+  renderer->draw_image(sleep_image_path, data, (size_t)size, 0, 0, width, height);
+  renderer->set_image_placeholder_enabled(true);
+  free(data);
+  renderer->flush_display();
+}
+
+void handleEpubList(Renderer *renderer, UIAction action, bool needs_redraw)
+{
+  // load up the epub list from the filesystem
+  if (!epub_list)
+  {
+    ESP_LOGI("main", "Creating epub list");
+    epub_list = new EpubList(renderer, epub_list_state);
+    // Paper S3 stores all EPUBs on the SD card under /fs/Books.
+    if (epub_list->load("/Books"))
+    {
+      ESP_LOGI("main", "Epub files loaded");
+    }
+  }
+  if (needs_redraw)
+  {
+    epub_list->set_needs_redraw();
+  }
+  // work out what the user wants us to do
+  switch (action)
+  {
+  case UP:
+    epub_list->prev();
+    break;
+  case DOWN:
+    epub_list->next();
+    break;
+  case SELECT:
+    // Try to show the table of contents if the book has one; otherwise
+    // fall back to opening the book directly.
+    ui_state = SELECTING_TABLE_CONTENTS;
+    contents = new EpubToc(epub_list_state.epub_list[epub_list_state.selected_item], epub_index_state, renderer);
+    if (!contents->load())
+    {
+      delete contents;
+      contents = nullptr;
+      ui_state = READING_EPUB;
+      handleEpub(renderer, NONE);
+      return;
+    }
+    contents->set_needs_redraw();
+    handleEpubTableContents(renderer, NONE, true);
+    return;
+  case NONE:
+  default:
+    // nothing to do
+    break;
+  }
+  epub_list->render();
 }
 
 void handleReaderMenu(Renderer *renderer, UIAction action)
@@ -1120,617 +1580,37 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
         show_status_bar_toast(renderer, label);
         renderReaderMenu(renderer);
       }
-    }
-    break;
-  case NONE:
-  default:
-    renderReaderMenu(renderer);
-    break;
-  }
-}
-
-void handleEpubList(Renderer *renderer, UIAction action, bool needs_redraw)
-{
-  // load up the epub list from the filesystem
-  if (!epub_list)
-  {
-    ESP_LOGI("main", "Creating epub list");
-    epub_list = new EpubList(renderer, epub_list_state);
-    // Paper S3 stores all EPUBs on the SD card under /fs/Books.
-    if (epub_list->load("/fs/Books"))
-    {
-      ESP_LOGI("main", "Epub files loaded");
-    }
-  }
-  if (needs_redraw)
-  {
-    epub_list->set_needs_redraw();
-  }
-  // work out what the user wants us to do
-  switch (action)
-  {
-  case UP:
-    epub_list->prev();
-    break;
-  case DOWN:
-    epub_list->next();
-    break;
-  case SELECT:
-    // Try to show the table of contents if the book has one; otherwise
-    // fall back to opening the book directly.
-    ui_state = SELECTING_TABLE_CONTENTS;
-    contents = new EpubToc(epub_list_state.epub_list[epub_list_state.selected_item], epub_index_state, renderer);
-    if (!contents->load())
-    {
-      delete contents;
-      contents = nullptr;
-      ui_state = READING_EPUB;
-      handleEpub(renderer, NONE);
-      return;
-    }
-    contents->set_needs_redraw();
-    handleEpubTableContents(renderer, NONE, true);
-    return;
-  case NONE:
-  default:
-    // nothing to do
-    break;
-  }
-  epub_list->render();
-}
-
-void handleUserInteraction(Renderer *renderer, UIAction ui_action, bool needs_redraw)
-{
-  // Global handling for status bar toggle while reading.
-  if (ui_action == TOGGLE_STATUS_BAR && ui_state == READING_EPUB)
-  {
-    status_bar_visible = !status_bar_visible;
-    save_app_settings(renderer);
-    // Re-render the current page; draw_battery_level() will
-    // pick up the new visibility on the next flush.
-    handleEpub(renderer, NONE);
-    show_status_bar_toast(renderer, status_bar_visible ? "Status bar ON" : "Status bar OFF");
-    return;
-  }
-
-  // From the library view, allow a gesture (e.g. two-finger swipe up)
-  // to open the reader menu directly, focusing on advanced settings.
-  if (ui_action == OPEN_READER_MENU && ui_state == SELECTING_EPUB)
-  {
-    ui_state = READING_MENU;
-    reader_menu_advanced = true;
-    reader_menu_selected = 0;
-    renderReaderMenu(renderer);
-    return;
-  }
-
-  switch (ui_state)
-  {
-  case READING_MENU:
-    handleReaderMenu(renderer, ui_action);
-    break;
-  case READING_EPUB:
-    if (ui_action == SELECT)
-    {
-      ui_state = READING_MENU;
-      reader_menu_selected = 0;
-      renderReaderMenu(renderer);
-    }
-    else
-    {
-      handleEpub(renderer, ui_action);
-    }
-    break;
-  case SELECTING_TABLE_CONTENTS:
-    handleEpubTableContents(renderer, ui_action, needs_redraw);
-    break;
-  case SELECTING_EPUB:
-  default:
-    handleEpubList(renderer, ui_action, needs_redraw);
-    break;
-  }
-}
-
-void draw_battery_level(Renderer *renderer, float voltage, float percentage)
-{
-  // If the status bar is hidden, restore full-page content by
-  // removing the reserved top margin and skip drawing any
-  // status elements.
-  if (!status_bar_visible)
-  {
-    renderer->set_margin_top(0);
-    return;
-  }
-
-  // clear the margin so we can draw the battery in the right place
-  renderer->set_margin_top(0);
-  int width = 40;
-  int height = 20;
-  int margin_right = 5;
-  int margin_top = 10;
-  int xpos = renderer->get_page_width() - width - margin_right;
-  int ypos = margin_top;
-  int percent_width = width * percentage / 100;
-  renderer->fill_rect(xpos, ypos, width, height, 255);
-  renderer->fill_rect(xpos + width - percent_width, ypos, percent_width, height, 0);
-  renderer->draw_rect(xpos, ypos, width, height, 0);
-  renderer->fill_rect(xpos - 4, ypos + height / 4, 4, height / 2, 0);
-  // put the margin back
-  renderer->set_margin_top(35);
-}
-
-static void show_library_loading(Renderer *renderer)
-{
-  renderer->clear_screen();
-  int page_width = renderer->get_page_width();
-  int page_height = renderer->get_page_height();
-  int line_height = renderer->get_line_height();
-  if (page_width <= 0 || page_height <= 0 || line_height <= 0)
-  {
-    return;
-  }
-
-  const char *msg = "Book library is loading";
-  int text_width = renderer->get_text_width(msg, false, false);
-  if (text_width < 0)
-  {
-    text_width = 0;
-  }
-
-  int x = (page_width - text_width) / 2;
-  if (x < 0)
-  {
-    x = 0;
-  }
-  int center_y = page_height / 2;
-  int y = center_y - (3 * line_height) / 4;
-
-  renderer->draw_text(x, y, msg, false, false);
-  renderer->flush_display();
-}
-
-static void show_sleep_cover(Renderer *renderer)
-{
-  int book_index = -1;
-  if (epub_list_state.num_epubs > 0)
-  {
-    if (ui_state == READING_EPUB || ui_state == READING_MENU || ui_state == SELECTING_TABLE_CONTENTS)
-    {
-      book_index = epub_list_state.selected_item;
-    }
-    if (book_index < 0)
-    {
-      book_index = find_last_open_book_index();
-    }
-  }
-
-  if (book_index < 0)
-  {
-    return;
-  }
-
-  EpubListItem &item = epub_list_state.epub_list[book_index];
-  if (item.cover_path[0] == '\0')
-  {
-    return;
-  }
-
-  Epub epub(item.path);
-  if (!epub.load())
-  {
-    return;
-  }
-
-  size_t image_data_size = 0;
-  uint8_t *image_data = epub.get_item_contents(item.cover_path, &image_data_size);
-  if (!image_data || image_data_size == 0)
-  {
-    free(image_data);
-    return;
-  }
-
-  int img_w = 0;
-  int img_h = 0;
-  bool can_render = renderer->get_image_size(item.cover_path, image_data, image_data_size, &img_w, &img_h);
-  if (!can_render || img_w <= 0 || img_h <= 0)
-  {
-    free(image_data);
-    return;
-  }
-
-  renderer->set_margin_top(0);
-  renderer->set_margin_bottom(0);
-  renderer->set_margin_left(0);
-  renderer->set_margin_right(0);
-
-  int width = renderer->get_page_width();
-  int height = renderer->get_page_height();
-
-  renderer->clear_screen();
-  renderer->set_image_placeholder_enabled(false);
-  renderer->draw_image(item.cover_path, image_data, image_data_size, 0, 0, width, height);
-  renderer->set_image_placeholder_enabled(true);
-  free(image_data);
-  renderer->flush_display();
-}
-
-static void show_sleep_image(Renderer *renderer)
-{
-  if (sleep_image_mode == SLEEP_IMAGE_OFF)
-  {
-    return;
-  }
-
-  if (sleep_image_mode == SLEEP_IMAGE_COVER)
-  {
-    show_sleep_cover(renderer);
-    return;
-  }
-
-  if (sleep_image_mode != SLEEP_IMAGE_RANDOM)
-  {
-    return;
-  }
-
-  const char *pics_dir = nullptr;
-  DIR *dir = nullptr;
-  const char *candidates[] = {"/fs/Images", "/fs/images", "/fs/Pics"};
-  for (int i = 0; i < 2; i++)
-  {
-    dir = opendir(candidates[i]);
-    if (dir)
-    {
-      pics_dir = candidates[i];
-      break;
-    }
-  }
-  if (!dir)
-  {
-    ESP_LOGW("main", "Sleep image directory not found: %s", "/fs/Images");
-    show_sleep_cover(renderer);
-    return;
-  }
-
-  char selected_path[512] = {0};
-  int image_count = 0;
-  struct dirent *ent;
-
-  while ((ent = readdir(dir)) != NULL)
-  {
-    if (ent->d_name[0] == '.' || ent->d_type == DT_DIR)
-    {
-      continue;
-    }
-
-    const char *dot = strrchr(ent->d_name, '.');
-    if (!dot || !dot[1])
-    {
-      continue;
-    }
-    const char *ext = dot + 1;
-    char e0 = tolower(ext[0]);
-    char e1 = tolower(ext[1]);
-    char e2 = tolower(ext[2]);
-    char e3 = tolower(ext[3]);
-
-    bool is_jpg = (e0 == 'j' && e1 == 'p' && e2 == 'g' && ext[3] == '\0');
-    bool is_jpeg = (e0 == 'j' && e1 == 'p' && e2 == 'e' && e3 == 'g' && ext[4] == '\0');
-    bool is_png = (e0 == 'p' && e1 == 'n' && e2 == 'g' && ext[3] == '\0');
-    if (!is_jpg && !is_jpeg && !is_png)
-    {
-      continue;
-    }
-
-    // Reservoir sampling so each image has equal probability.
-    image_count++;
-    if (image_count == 1)
-    {
-      snprintf(selected_path, sizeof(selected_path), "%s/%s", pics_dir, ent->d_name);
-    }
-    else
-    {
-      uint32_t r = esp_random();
-      if (r % (uint32_t)image_count == 0)
+      else if (reader_menu_selected == 10)
       {
-        snprintf(selected_path, sizeof(selected_path), "%s/%s", pics_dir, ent->d_name);
-      }
-    }
-  }
-  closedir(dir);
-
-  if (image_count == 0 || selected_path[0] == '\0')
-  {
-    ESP_LOGW("main", "No image files found in %s", pics_dir);
-    show_sleep_cover(renderer);
-    return;
-  }
-
-  const char *sleep_image_path = selected_path;
-  FILE *fp = fopen(sleep_image_path, "rb");
-  if (!fp)
-  {
-    ESP_LOGW("main", "Sleep image not found at %s", sleep_image_path);
-    show_sleep_cover(renderer);
-    return;
-  }
-
-  if (fseek(fp, 0, SEEK_END) != 0)
-  {
-    fclose(fp);
-    show_sleep_cover(renderer);
-    return;
-  }
-  long size = ftell(fp);
-  if (size <= 0)
-  {
-    fclose(fp);
-    ESP_LOGW("main", "Sleep image file has invalid size: %s", sleep_image_path);
-    show_sleep_cover(renderer);
-    return;
-  }
-  if (fseek(fp, 0, SEEK_SET) != 0)
-  {
-    fclose(fp);
-    show_sleep_cover(renderer);
-    return;
-  }
-
-  uint8_t *data = (uint8_t *)malloc((size_t)size);
-  if (!data)
-  {
-    fclose(fp);
-    ESP_LOGW("main", "Failed to allocate memory for sleep image");
-    show_sleep_cover(renderer);
-    return;
-  }
-
-  size_t read = fread(data, 1, (size_t)size, fp);
-  fclose(fp);
-  if (read != (size_t)size)
-  {
-    free(data);
-    ESP_LOGW("main", "Failed to read full sleep image");
-    show_sleep_cover(renderer);
-    return;
-  }
-
-  int img_w = 0;
-  int img_h = 0;
-  bool can_render = renderer->get_image_size(sleep_image_path, data, (size_t)size, &img_w, &img_h);
-  if (!can_render || img_w <= 0 || img_h <= 0)
-  {
-    free(data);
-    ESP_LOGW("main", "Sleep image decode failed: %s", sleep_image_path);
-    show_sleep_cover(renderer);
-    return;
-  }
-
-  // Draw full-screen, ignoring margins.
-  renderer->set_margin_top(0);
-  renderer->set_margin_bottom(0);
-  renderer->set_margin_left(0);
-  renderer->set_margin_right(0);
-
-  int width = renderer->get_page_width();
-  int height = renderer->get_page_height();
-
-  renderer->clear_screen();
-  // For sleep images we do not want to show the generic cover placeholder
-  // if decoding fails; just leave the screen as-is in that case.
-  renderer->set_image_placeholder_enabled(false);
-  renderer->draw_image(sleep_image_path, data, (size_t)size, 0, 0, width, height);
-  renderer->set_image_placeholder_enabled(true);
-  free(data);
-  renderer->flush_display();
-}
-
-void main_task(void *param)
-{
-  // start the board up
-  ESP_LOGI("main", "Powering up the board");
-  Board *board = Board::factory();
-  board->power_up();
-  // create the renderer for the board
-  ESP_LOGI("main", "Creating renderer");
-  Renderer *renderer = board->get_renderer();
-  // bring the file system up - SPIFFS or SDCard depending on the defines in platformio.ini
-  ESP_LOGI("main", "Starting file system");
-  board->start_filesystem();
-
-#ifdef USE_FREETYPE
-#if defined(BOARD_TYPE_PAPER_S3)
-  // For Paper S3, initialize the global FreeType font once the filesystem
-  // is available so that all subsequent UI and reading text rendering uses
-  // the TTF font from /fs.
-  init_freetype_for_paper_s3(renderer);
-#endif
-#endif
-
-  load_app_settings(renderer);
-
-  // battery details
-  ESP_LOGI("main", "Starting battery monitor");
-  Battery *battery = board->get_battery();
-  if (battery)
-  {
-    battery->setup();
-  }
-
-  apply_page_margins(renderer);
-
-  // create a message queue for UI events
-  QueueHandle_t ui_queue = xQueueCreate(10, sizeof(UIAction));
-
-  // set the controls up
-  ESP_LOGI("main", "Setting up controls");
-  ButtonControls *button_controls = board->get_button_controls(ui_queue);
-  TouchControls *touch_controls = board->get_touch_controls(renderer, ui_queue);
-
-  ESP_LOGI("main", "Controls configured");
-  // work out if we were woken from deep sleep
-  if (button_controls->did_wake_from_deep_sleep())
-  {
-    // restore the renderer state - it should have been saved when we went to sleep...
-    bool hydrate_success = renderer->hydrate();
-    UIAction ui_action = button_controls->get_deep_sleep_action();
-
-#if defined(BOARD_TYPE_PAPER_S3)
-    // On Paper S3, a deep-sleep wake should always behave like
-    // "resume reading": rebuild the EPUB list state and jump
-    // straight back into the last-open book and page, regardless
-    // of the Startup preference (which only affects cold boots).
-    if (!epub_list)
-    {
-      epub_list = new EpubList(renderer, epub_list_state);
-      epub_list->load("/fs/Books");
-    }
-    int last_book_index = find_last_open_book_index();
-    if (last_book_index >= 0)
-    {
-      epub_list_state.selected_item = last_book_index;
-      ui_state = READING_EPUB;
-      // Ignore any deep-sleep button action on Paper S3 (there
-      // are no navigation buttons); we just want to render the
-      // last-opened page.
-      ui_action = NONE;
-    }
-#endif
-
-    handleUserInteraction(renderer, ui_action, !hydrate_success);
-  }
-  else
-  {
-    // reset the screen
-    renderer->reset();
-    show_library_loading(renderer);
-    if (!epub_list)
-    {
-      epub_list = new EpubList(renderer, epub_list_state);
-      epub_list->load("/fs/Books");
-    }
-    if (open_last_book_on_startup)
-    {
-      int last_book_index = find_last_open_book_index();
-      if (last_book_index >= 0)
-      {
-        epub_list_state.selected_item = last_book_index;
-        ui_state = READING_EPUB;
-      }
-    }
-    // make sure the UI is in the right state
-    handleUserInteraction(renderer, NONE, true);
-  }
-
-  // draw the battery level before flushing the screen
-  if (battery)
-  {
-    draw_battery_level(renderer, battery->get_voltage(), battery->get_percentage());
-  }
-  touch_controls->render(renderer);
-  renderer->flush_display();
-
-  // keep track of when the user last interacted and go to sleep after N seconds
-  int64_t last_user_interaction = esp_timer_get_time();
-  int64_t last_battery_update = last_user_interaction;
-  bool screen_dirty = false;
-  const int64_t battery_update_interval_us = 60 * 1000 * 1000;
-  while (true)
-  {
-    if (g_request_sleep_now)
-    {
-      break;
-    }
-
-    bool in_reading_context = (ui_state == READING_EPUB || ui_state == READING_MENU || ui_state == SELECTING_TABLE_CONTENTS);
-    int64_t idle_timeout_us = in_reading_context ? idle_timeout_reading_us : idle_timeout_library_us;
-    if (esp_timer_get_time() - last_user_interaction >= idle_timeout_us)
-    {
-      break;
-    }
-    UIAction ui_action = NONE;
-    // wait for something to happen for 60 seconds
-    if (xQueueReceive(ui_queue, &ui_action, pdMS_TO_TICKS(60000)) == pdTRUE)
-    {
-      if (ui_action != NONE)
-      {
-        // something happened!
-        last_user_interaction = esp_timer_get_time();
-        // show feedback on the touch controls
-        touch_controls->renderPressedState(renderer, ui_action);
-        handleUserInteraction(renderer, ui_action, false);
-
-        // make sure to clear the feedback on the touch controls
-        touch_controls->render(renderer);
-        if (battery)
+        line_spacing_profile = (LineSpacingProfile)(((int)line_spacing_profile + 1) % 3);
+        apply_line_spacing_profile(renderer);
+        save_app_settings(renderer);
+        int spacing_percent = 100;
+        if (line_spacing_profile == LINE_SPACING_120)
         {
-          draw_battery_level(renderer, battery->get_voltage(), battery->get_percentage());
+          spacing_percent = 120;
         }
-        screen_dirty = true;
+        else if (line_spacing_profile == LINE_SPACING_140)
+        {
+          spacing_percent = 140;
+        }
+        char toast[32];
+        snprintf(toast, sizeof(toast), "Line spacing: %d%%", spacing_percent);
+        show_status_bar_toast(renderer, toast);
+        renderReaderMenu(renderer);
       }
-    }
-    int64_t now = esp_timer_get_time();
-    if (battery && (now - last_battery_update) >= battery_update_interval_us)
-    {
-      last_battery_update = now;
-      ESP_LOGI("main", "Battery Level %f, percent %d", battery->get_voltage(), battery->get_percentage());
-      draw_battery_level(renderer, battery->get_voltage(), battery->get_percentage());
-
-      int top_width = renderer->get_page_width();
-      int top_height = 50;
-      if (top_width > 0 && top_height > 0)
+      else if (reader_menu_selected == 11)
       {
-        renderer->flush_area(0, 0, top_width, top_height);
+        save_app_settings(renderer);
+        reader_menu_advanced = false;
+        reader_menu_selected = 0;
+        renderReaderMenu(renderer);
       }
     }
-    if (screen_dirty)
-    {
-      renderer->flush_display();
-      screen_dirty = false;
-    }
+    break;
+  case NONE:
+  default:
+    renderReaderMenu(renderer);
+    break;
   }
-  // Persist EPUB list state (including current section/page) so that
-  // cold boots and deep-sleep resumes can restore the last-read book
-  // and page via the BOOKS.IDX index.
-  if (epub_list)
-  {
-    epub_list->save_index("/fs/Books/BOOKS.IDX");
-  }
-  show_sleep_image(renderer);
-  ESP_LOGI("main", "Saving state");
-  // save the state of the renderer
-  renderer->dehydrate();
-  // turn off the filesystem
-  board->stop_filesystem();
-  // get ready to go to sleep
-  board->prepare_to_sleep();
-  esp_err_t err = esp_sleep_enable_ulp_wakeup();
-  if (err != ESP_OK)
-  {
-    ESP_LOGW("main", "esp_sleep_enable_ulp_wakeup failed: %s", esp_err_to_name(err));
-  }
-  ESP_LOGI("main", "Entering deep sleep");
-  // configure deep sleep options
-  button_controls->setup_deep_sleep();
-  vTaskDelay(pdMS_TO_TICKS(500));
-  // go to sleep
-  esp_deep_sleep_start();
-}
-
-void app_main()
-{
-  // Logging control
-  esp_log_level_set("main", LOG_LEVEL);
-  esp_log_level_set("EPUB", LOG_LEVEL);
-  esp_log_level_set("PUBLIST", LOG_LEVEL);
-  esp_log_level_set("ZIP", LOG_LEVEL);
-  esp_log_level_set("JPG", LOG_LEVEL);
-  esp_log_level_set("TOUCH", LOG_LEVEL);
-
-  // dump out the epub list state
-  ESP_LOGI("main", "epub list state num_epubs=%d", epub_list_state.num_epubs);
-  ESP_LOGI("main", "epub list state is_loaded=%d", epub_list_state.is_loaded);
-  ESP_LOGI("main", "epub list state selected_item=%d", epub_list_state.selected_item);
-
-  ESP_LOGI("main", "Memory before main task start %d", esp_get_free_heap_size());
-  xTaskCreatePinnedToCore(main_task, "main_task", 32768, NULL, 1, NULL, 1);
 }

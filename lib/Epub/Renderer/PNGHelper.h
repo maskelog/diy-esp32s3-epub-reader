@@ -9,7 +9,7 @@ class Renderer;
 #include <pngle.h>
 #else
 #include <PNGdec.h>
-void png_draw_callback(PNGDRAW *draw);
+int png_draw_callback(PNGDRAW *draw);
 #endif
 
 class PNGHelper : public ImageHelper
@@ -26,7 +26,7 @@ private:
   uint16_t *tmp_rgb565_buffer;
   PNG png;
 
-  friend void png_draw_callback(PNGDRAW *draw);
+  friend int png_draw_callback(PNGDRAW *draw);
 #else
   // Allow pngle callbacks defined in PNGHelper.cpp to access the
   // internal state (renderer, x_pos, y_pos, scales, etc.).

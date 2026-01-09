@@ -2,9 +2,9 @@
 
 #include <ctype.h>
 #include <stdio.h>
-#include <sys/stat.h>
-#include <errno.h>
 #include <string.h>
+#include <SPI.h>
+#include <SD.h>
 
 #ifndef UNIT_TEST
   #include <freertos/FreeRTOS.h>
@@ -48,7 +48,7 @@ bool EpubList::load(const char *path)
     return true;
   }
   // Use an 8.3-safe filename so the FAT implementation can always create it.
-  const char *index_path = "/fs/Books/BOOKS.IDX";
+  const char *index_path = "/Books/BOOKS.IDX";
   if (load_index(path, index_path))
   {
     ESP_LOGI(TAG, "Loaded EPUB index from %s", index_path);
@@ -66,22 +66,20 @@ bool EpubList::load(const char *path)
   {
     base_path += "/";
   }
-  DIR *dir;
-  struct dirent *ent;
-  if ((dir = opendir(path)) != NULL)
+  File dir = SD.open(path);
+  File file;
+  while ((file = dir.openNextFile()))
   {
-    while ((ent = readdir(dir)) != NULL)
+    ESP_LOGD(TAG, "Found file: %s", file.name());
+    // ignore any hidden files starting with "." and any directories
+    // Also ignore files starting with '_' which on macOS FAT volumes are
+    // typically AppleDouble metadata (e.g. "_THEGR~6.EPU").
+    if (file.name()[0] == '.' || file.name()[0] == '_' || file.isDirectory())
     {
-      ESP_LOGD(TAG, "Found file: %s", ent->d_name);
-      // ignore any hidden files starting with "." and any directories
-      // Also ignore files starting with '_' which on macOS FAT volumes are
-      // typically AppleDouble metadata (e.g. "_THEGR~6.EPU").
-      if (ent->d_name[0] == '.' || ent->d_name[0] == '_' || ent->d_type == DT_DIR)
-      {
-        continue;
-      }
+      continue;
+    }
 
-      const char *dot = strrchr(ent->d_name, '.');
+    const char *dot = strrchr(file.name(), '.');
       if (!dot || !dot[1])
       {
         continue;
@@ -98,15 +96,36 @@ bool EpubList::load(const char *path)
       {
         continue;
       }
-      ESP_LOGD(TAG, "Loading epub %s", ent->d_name);
-      Epub *epub = new Epub(base_path + ent->d_name);
+      ESP_LOGD(TAG, "Loading epub %s", file.name());
+      Epub *epub = new Epub(base_path + file.name());
       if (epub->load())
       {
         strncpy(state.epub_list[state.num_epubs].path, epub->get_path().c_str(), MAX_PATH_SIZE);
         strncpy(state.epub_list[state.num_epubs].title, replace_html_entities(epub->get_title()).c_str(), MAX_TITLE_SIZE);
         const std::string &cover_item = epub->get_cover_image_item();
+        size_t cover_data_size = 0;
+        uint8_t *cover_data = nullptr;
+        bool valid_cover = false;
+        bool skip_cover = false;
         if (!cover_item.empty())
         {
+          const char *cover_ext = strrchr(cover_item.c_str(), '.');
+          if (cover_ext)
+          {
+            char e0 = tolower(cover_ext[1]);
+            char e1 = tolower(cover_ext[2]);
+            char e2 = tolower(cover_ext[3]);
+            char e3 = tolower(cover_ext[4]);
+            bool is_jpg = (e0 == 'j' && e1 == 'p' && e2 == 'g' && cover_ext[4] == '\0');
+            bool is_jpeg = (e0 == 'j' && e1 == 'p' && e2 == 'e' && e3 == 'g' && cover_ext[5] == '\0');
+            if (is_jpg || is_jpeg)
+            {
+              state.epub_list[state.num_epubs].cover_path[0] = '\0';
+              skip_cover = true;
+            }
+          }
+          if (!skip_cover)
+          {
           // Copy the declared cover path into the persisted state, then
           // validate that the image can actually be decoded. If anything
           // about the cover is invalid (missing resource, corrupt data,
@@ -116,9 +135,7 @@ bool EpubList::load(const char *path)
           strncpy(state.epub_list[state.num_epubs].cover_path, cover_item.c_str(), MAX_PATH_SIZE);
           state.epub_list[state.num_epubs].cover_path[MAX_PATH_SIZE - 1] = '\0';
 
-          size_t cover_data_size = 0;
-          uint8_t *cover_data = epub->get_item_contents(cover_item, &cover_data_size);
-          bool valid_cover = false;
+          cover_data = epub->get_item_contents(cover_item, &cover_data_size);
           if (cover_data && cover_data_size > 0)
           {
             int cw = 0;
@@ -147,12 +164,13 @@ bool EpubList::load(const char *path)
             ESP_LOGW(TAG, "Invalid cover for '%s', using title-only card instead", state.epub_list[state.num_epubs].title);
             state.epub_list[state.num_epubs].cover_path[0] = '\0';
           }
-          free(cover_data);
+          }
         }
         else
         {
           state.epub_list[state.num_epubs].cover_path[0] = '\0';
         }
+        free(cover_data);
         state.num_epubs++;
         if (state.num_epubs == MAX_EPUB_LIST_SIZE)
         {
@@ -162,11 +180,11 @@ bool EpubList::load(const char *path)
       }
       else
       {
-        ESP_LOGE(TAG, "Failed to load epub %s", ent->d_name);
+        ESP_LOGE(TAG, "Failed to load epub %s", file.name());
       }
       delete epub;
     }
-    closedir(dir);
+    dir.close();
     std::sort(
         state.epub_list,
         state.epub_list + state.num_epubs,
@@ -174,26 +192,6 @@ bool EpubList::load(const char *path)
         {
           return strcmp(a.title, b.title) < 0;
         });
-  }
-  else
-  {
-    renderer->clear_screen();
-    uint16_t y = renderer->get_page_height()/2-80;
-    renderer->show_img(18, y+41, warning_width, warning_height, warning_data);
-    const char * warning = "Please insert SD Card";
-    renderer->draw_rect(1, y, renderer->get_text_width(warning, true, false)+150, 115, 80);
-    renderer->draw_text_box(warning, warning_width+25, y+4, renderer->get_page_width(), 80, true, false);
-    renderer->draw_text_box("Restarting in 10 secs.", warning_width+25, y+34, renderer->get_page_width(), 80, false, false);
-    perror("");
-    renderer->flush_display();
-    ESP_LOGE(TAG, "Is SD-Card inserted and properly connected?\nCould not open directory %s", path);
-    #ifndef UNIT_TEST
-      vTaskDelay(pdMS_TO_TICKS(1000*10));
-      esp_restart();
-    #endif
-    
-    return false;
-  }
   // sanity check our state
   if (state.selected_item >= state.num_epubs)
   {
@@ -668,7 +666,7 @@ void EpubList::render()
 // followed by count EpubListItem records.
 bool EpubList::load_index(const char *books_path, const char *index_path)
 {
-  FILE *fp = fopen(index_path, "rb");
+  File fp = SD.open(index_path, FILE_READ);
   if (!fp)
   {
     return false;
@@ -676,25 +674,25 @@ bool EpubList::load_index(const char *books_path, const char *index_path)
   uint32_t magic = 0;
   uint16_t version = 0;
   uint16_t count = 0;
-  if (fread(&magic, sizeof(magic), 1, fp) != 1 ||
-      fread(&version, sizeof(version), 1, fp) != 1 ||
-      fread(&count, sizeof(count), 1, fp) != 1)
+  if (fp.read((uint8_t *)&magic, sizeof(magic)) != sizeof(magic) ||
+      fp.read((uint8_t *)&version, sizeof(version)) != sizeof(version) ||
+      fp.read((uint8_t *)&count, sizeof(count)) != sizeof(count))
   {
-    fclose(fp);
+    fp.close();
     return false;
   }
   const uint32_t EXPECTED_MAGIC = 0x58494245; // 'EBIX'
   if (magic != EXPECTED_MAGIC || version != 1 || count == 0 || count > MAX_EPUB_LIST_SIZE)
   {
-    fclose(fp);
+    fp.close();
     return false;
   }
-  if (fread(state.epub_list, sizeof(EpubListItem), count, fp) != count)
+  if (fp.read((uint8_t *)state.epub_list, sizeof(EpubListItem) * count) != sizeof(EpubListItem) * count)
   {
-    fclose(fp);
+    fp.close();
     return false;
   }
-  fclose(fp);
+  fp.close();
 
   // Quick validation: count EPUB-like files in books_path and ensure it matches
   int dir_count = 0;
@@ -746,42 +744,29 @@ bool EpubList::load_index(const char *books_path, const char *index_path)
 
 void EpubList::save_index(const char *index_path)
 {
-  char path_buf[MAX_PATH_SIZE];
-  strncpy(path_buf, index_path, sizeof(path_buf));
-  path_buf[sizeof(path_buf) - 1] = '\0';
-  char *last_slash = strrchr(path_buf, '/');
-  if (last_slash)
-  {
-    *last_slash = '\0';
-    struct stat st;
-    if (stat(path_buf, &st) != 0)
-    {
-      mkdir(path_buf, 0775);
-    }
-  }
-  FILE *fp = fopen(index_path, "wb");
+  File fp = SD.open(index_path, FILE_WRITE);
   if (!fp)
   {
-    ESP_LOGE(TAG, "Failed to open index file %s for write: errno=%d (%s)", index_path, errno, strerror(errno));
+    ESP_LOGE(TAG, "Failed to open index file %s for write", index_path);
     return;
   }
   const uint32_t magic = 0x58494245; // 'EBIX'
   const uint16_t version = 1;
   uint16_t count = static_cast<uint16_t>(state.num_epubs);
-  if (fwrite(&magic, sizeof(magic), 1, fp) != 1 ||
-      fwrite(&version, sizeof(version), 1, fp) != 1 ||
-      fwrite(&count, sizeof(count), 1, fp) != 1)
+  if (fp.write((const uint8_t *)&magic, sizeof(magic)) != sizeof(magic) ||
+      fp.write((const uint8_t *)&version, sizeof(version)) != sizeof(version) ||
+      fp.write((const uint8_t *)&count, sizeof(count)) != sizeof(count))
   {
     ESP_LOGE(TAG, "Failed to write index header to %s", index_path);
-    fclose(fp);
+    fp.close();
     return;
   }
   if (count > 0)
   {
-    if (fwrite(state.epub_list, sizeof(EpubListItem), count, fp) != count)
+    if (fp.write((uint8_t *)state.epub_list, sizeof(EpubListItem) * count) != sizeof(EpubListItem) * count)
     {
       ESP_LOGE(TAG, "Failed to write index entries to %s", index_path);
     }
   }
-  fclose(fp);
+  fp.close();
 }

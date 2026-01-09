@@ -71,6 +71,6 @@ public:
   }
   virtual int get_line_height()
   {
-    return 1;
+    return apply_line_spacing(1);
   }
 };

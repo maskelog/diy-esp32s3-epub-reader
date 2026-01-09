@@ -685,7 +685,7 @@ UIAction PaperS3TouchControls::mapTapToAction(uint16_t x, uint16_t y)
     // Mirror the reader menu item counts and paging used in
     // renderReaderMenu(): 6 basic items, 10 advanced items, with a
     // maximum of 6 visible per page (EPUB_TOC_ITEMS_PER_PAGE).
-    int items_total = reader_menu_advanced ? 10 : 6;
+    int items_total = reader_menu_advanced ? 12 : 6;
     if (items_total <= 0)
     {
       return NONE;

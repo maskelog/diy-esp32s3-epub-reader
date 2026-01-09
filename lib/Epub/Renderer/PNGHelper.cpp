@@ -186,8 +186,8 @@ bool PNGHelper::get_size(const uint8_t *data, size_t data_size, int *width, int 
     ESP_LOGI(TAG, "image specs: (%d x %d), %d bpp, pixel type: %d", png.getWidth(), png.getHeight(), png.getBpp(), png.getPixelType());
     *width = png.getWidth();
     *height = png.getHeight();
-    return true;
     png.close();
+    return true;
   }
   else
   {
@@ -204,10 +204,37 @@ bool PNGHelper::render(const uint8_t *data, size_t data_size, Renderer *renderer
   int rc = png.openRAM(const_cast<uint8_t *>(data), data_size, png_draw_callback);
   if (rc == PNG_SUCCESS)
   {
-    this->x_scale = std::min(1.0f, float(width) / float(png.getWidth()));
-    this->y_scale = std::min(1.0f, float(height) / float(png.getHeight()));
+    int img_w = png.getWidth();
+    int img_h = png.getHeight();
+    if (width <= 0 || height <= 0 || img_w <= 0 || img_h <= 0)
+    {
+      ESP_LOGE(TAG, "invalid PNG size (%d x %d) or target (%d x %d)", img_w, img_h, width, height);
+      png.close();
+      return false;
+    }
+    this->x_scale = std::min(1.0f, float(width) / float(img_w));
+    this->y_scale = std::min(1.0f, float(height) / float(img_h));
+    if (this->x_scale <= 0.0f || this->y_scale <= 0.0f)
+    {
+      ESP_LOGE(TAG, "invalid PNG scale (%f x %f)", this->x_scale, this->y_scale);
+      png.close();
+      return false;
+    }
     this->last_y = -1;
-    this->tmp_rgb565_buffer = (uint16_t *)malloc(png.getWidth() * 2);
+    size_t row_bytes = static_cast<size_t>(img_w) * sizeof(uint16_t);
+    if (row_bytes / sizeof(uint16_t) != static_cast<size_t>(img_w))
+    {
+      ESP_LOGE(TAG, "PNG row size overflow: %d", img_w);
+      png.close();
+      return false;
+    }
+    this->tmp_rgb565_buffer = (uint16_t *)malloc(row_bytes);
+    if (!this->tmp_rgb565_buffer)
+    {
+      ESP_LOGE(TAG, "PNG row buffer alloc failed: %d", img_w);
+      png.close();
+      return false;
+    }
 
     png.decode(this, PNG_FAST_PALETTE);
     png.close();
@@ -223,6 +250,10 @@ bool PNGHelper::render(const uint8_t *data, size_t data_size, Renderer *renderer
 
 void PNGHelper::draw_callback(PNGDRAW *draw)
 {
+  if (!tmp_rgb565_buffer)
+  {
+    return;
+  }
   // work out where we should be drawing this line
   int y = y_pos + draw->y * y_scale;
   // only bother to draw if we haven't already drawn to this destination line
@@ -232,10 +263,29 @@ void PNGHelper::draw_callback(PNGDRAW *draw)
     vTaskDelay(1);
     // get the rgb 565 pixel values                 BKG is in form of 00BBGGRR
     png.getLineAsRGB565(draw, tmp_rgb565_buffer, 0, 0x00FFFFFF);
-    for (int x = 0; x < png.getWidth() * x_scale; x++)
+    int src_width = png.getWidth();
+    if (src_width <= 0 || x_scale <= 0.0f)
+    {
+      return;
+    }
+    int dst_width = static_cast<int>(src_width * x_scale);
+    if (dst_width <= 0)
+    {
+      return;
+    }
+    for (int x = 0; x < dst_width; x++)
     {
       uint8_t r, g, b;
-      convert_rgb_565_to_rgb(tmp_rgb565_buffer[int(x / x_scale)], &r, &g, &b);
+      int src_x = static_cast<int>(x / x_scale);
+      if (src_x < 0)
+      {
+        src_x = 0;
+      }
+      else if (src_x >= src_width)
+      {
+        src_x = src_width - 1;
+      }
+      convert_rgb_565_to_rgb(tmp_rgb565_buffer[src_x], &r, &g, &b);
       uint32_t gray = (r * 38 + g * 75 + b * 15) >> 7;
       renderer->draw_pixel(x_pos + x, y, gray);
     }
@@ -243,10 +293,11 @@ void PNGHelper::draw_callback(PNGDRAW *draw)
   }
 };
 
-void png_draw_callback(PNGDRAW *draw)
+int png_draw_callback(PNGDRAW *draw)
 {
   PNGHelper *helper = (PNGHelper *)draw->pUser;
   helper->draw_callback(draw);
+  return 1;
 }
 
 #endif // USE_PNGLE
