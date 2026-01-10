@@ -48,6 +48,13 @@ M5GfxRenderer::M5GfxRenderer()
                  M5.Display.width(), M5.Display.height());
     }
 
+    // Set E-Paper mode to fast partial refresh (reduces flickering)
+    // epd_fast: partial refresh without full screen flash
+    M5.Display.setEpdMode(epd_mode_t::epd_fast);
+
+    // Track refresh count for periodic full refresh
+    m_refresh_count = 0;
+
     // efont는 draw_text에서 직접 사용됨
 }
 
@@ -113,8 +120,9 @@ void M5GfxRenderer::draw_text(int x, int y, const char *text, bool bold, bool it
         return;
 
     // efont를 사용하여 텍스트 그리기 (m5book의 printEfontGeneric 방식)
-    int posX = x;
-    int posY = y;
+    // Apply margins from base Renderer class
+    int posX = x + margin_left;
+    int posY = y + margin_top;
     int textsize = 2; // 기본 크기
 
     byte font[32];
@@ -167,7 +175,7 @@ void M5GfxRenderer::draw_rect(int x, int y, int width, int height, uint8_t color
 {
     if (framebuffer)
     {
-        framebuffer->drawRect(x, y, width, height, color);
+        framebuffer->drawRect(x + margin_left, y + margin_top, width, height, color);
     }
 }
 
@@ -175,7 +183,7 @@ void M5GfxRenderer::fill_rect(int x, int y, int width, int height, uint8_t color
 {
     if (framebuffer)
     {
-        framebuffer->fillRect(x, y, width, height, color);
+        framebuffer->fillRect(x + margin_left, y + margin_top, width, height, color);
     }
 }
 
@@ -191,23 +199,51 @@ void M5GfxRenderer::flush_display()
 {
     if (framebuffer)
     {
+        m_refresh_count++;
+
+        // Every 10 page turns, do a full quality refresh to clear ghosting
+        if (m_refresh_count >= 10)
+        {
+            M5.Display.setEpdMode(epd_mode_t::epd_quality);
+            framebuffer->pushSprite(0, 0);
+            M5.Display.setEpdMode(epd_mode_t::epd_fast);
+            m_refresh_count = 0;
+        }
+        else
+        {
+            // Normal fast partial refresh (no flickering)
+            framebuffer->pushSprite(0, 0);
+        }
+    }
+}
+
+void M5GfxRenderer::flush_display_full()
+{
+    if (framebuffer)
+    {
+        // Force full quality refresh
+        M5.Display.setEpdMode(epd_mode_t::epd_quality);
         framebuffer->pushSprite(0, 0);
+        M5.Display.setEpdMode(epd_mode_t::epd_fast);
+        m_refresh_count = 0;
     }
 }
 
 int M5GfxRenderer::get_page_width()
 {
-    return M5.Display.width();
+    return M5.Display.width() - margin_left - margin_right;
 }
 
 int M5GfxRenderer::get_page_height()
 {
-    return M5.Display.height();
+    return M5.Display.height() - margin_top - margin_bottom;
 }
 
 int M5GfxRenderer::get_line_height()
 {
-    return apply_line_spacing(24); // based on efont size
+    // efont is 16px, with textsize=2 it becomes 32px
+    // Add 4px padding for readability
+    return apply_line_spacing(36); // 32px char height + 4px padding
 }
 
 void M5GfxRenderer::reset()
@@ -282,13 +318,17 @@ void M5GfxRenderer::draw_image(const std::string &filename, const uint8_t *data,
     if (!framebuffer || !data || data_size == 0)
         return;
 
+    // Apply margins
+    int draw_x = x + margin_left;
+    int draw_y = y + margin_top;
+
     // Skip very large images that might cause timeout
     if (data_size > 300000)
     {
         ESP_LOGW("M5GfxRenderer", "Skipping large image (%zu bytes)", data_size);
         // Draw placeholder
-        framebuffer->fillRect(x, y, width, height, 0xCCCC);
-        framebuffer->drawRect(x, y, width, height, 0x0000);
+        framebuffer->fillRect(draw_x, draw_y, width, height, 0xCCCC);
+        framebuffer->drawRect(draw_x, draw_y, width, height, 0x0000);
         return;
     }
 
@@ -319,7 +359,7 @@ void M5GfxRenderer::draw_image(const std::string &filename, const uint8_t *data,
     vTaskDelay(1);
 
     ESP_LOGI("M5GfxRenderer", "Drawing image: %s (%zu bytes) at (%d,%d) size %dx%d",
-             filename.c_str(), data_size, x, y, width, height);
+             filename.c_str(), data_size, draw_x, draw_y, width, height);
 
     // Draw to framebuffer using LGFX_Sprite's drawJpg/drawPng
     // Parameters: data, size, x, y, maxWidth, maxHeight, offX, offY, scale_x, scale_y
@@ -327,24 +367,24 @@ void M5GfxRenderer::draw_image(const std::string &filename, const uint8_t *data,
     if (is_jpg)
     {
         // Use drawJpg with maxWidth/maxHeight for scaling
-        success = framebuffer->drawJpg(data, data_size, x, y, width, height, 0, 0, 1.0f, 1.0f);
+        success = framebuffer->drawJpg(data, data_size, draw_x, draw_y, width, height, 0, 0, 1.0f, 1.0f);
     }
     else if (is_png)
     {
-        success = framebuffer->drawPng(data, data_size, x, y, width, height, 0, 0, 1.0f, 1.0f);
+        success = framebuffer->drawPng(data, data_size, draw_x, draw_y, width, height, 0, 0, 1.0f, 1.0f);
     }
     else
     {
         // Default to JPEG
-        success = framebuffer->drawJpg(data, data_size, x, y, width, height, 0, 0, 1.0f, 1.0f);
+        success = framebuffer->drawJpg(data, data_size, draw_x, draw_y, width, height, 0, 0, 1.0f, 1.0f);
     }
 
     if (!success)
     {
         ESP_LOGW("M5GfxRenderer", "Failed to draw image, showing placeholder");
         // Draw error placeholder
-        framebuffer->fillRect(x, y, width, height, 0xCCCC);
-        framebuffer->drawRect(x, y, width, height, 0x0000);
+        framebuffer->fillRect(draw_x, draw_y, width, height, 0xCCCC);
+        framebuffer->drawRect(draw_x, draw_y, width, height, 0x0000);
     }
     else
     {

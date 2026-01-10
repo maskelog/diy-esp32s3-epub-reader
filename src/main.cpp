@@ -1077,7 +1077,7 @@ static void apply_page_margins(Renderer *renderer)
     right = 10;
     break;
   }
-  renderer->set_margin_top(35);
+  renderer->set_margin_top(37);
   renderer->set_margin_left(left);
   renderer->set_margin_right(right);
 }
@@ -1210,7 +1210,7 @@ void draw_battery_level(Renderer *renderer, float voltage, float percentage)
   renderer->draw_rect(xpos, ypos, width, height, 0);
   renderer->fill_rect(xpos - 4, ypos + height / 4, 4, height / 2, 0);
   // put the margin back
-  renderer->set_margin_top(35);
+  renderer->set_margin_top(37);
 }
 
 static void show_library_loading(Renderer *renderer)

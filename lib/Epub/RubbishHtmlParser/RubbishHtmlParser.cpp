@@ -38,7 +38,7 @@ const int NUM_BOLD_TAGS = sizeof(BOLD_TAGS) / sizeof(BOLD_TAGS[0]);
 const char *ITALIC_TAGS[] = {"i", "em"};
 const int NUM_ITALIC_TAGS = sizeof(ITALIC_TAGS) / sizeof(ITALIC_TAGS[0]);
 
-const char *IMAGE_TAGS[] = {"img"};
+const char *IMAGE_TAGS[] = {"img", "image"};  // "image" for SVG
 const int NUM_IMAGE_TAGS = sizeof(IMAGE_TAGS) / sizeof(IMAGE_TAGS[0]);
 
 const char *SKIP_TAGS[] = {"head", "table"};
@@ -136,8 +136,17 @@ bool RubbishHtmlParser::enter_node(const pugi::xml_node &element)
   // we only handle image tags
   if (matches(tag_name, IMAGE_TAGS, NUM_IMAGE_TAGS))
   {
+    // Try src first, then xlink:href (for SVG), then href
     const char *src = element.attribute("src").value();
-    if (src)
+    if (!src || strlen(src) == 0)
+    {
+      src = element.attribute("xlink:href").value();
+    }
+    if (!src || strlen(src) == 0)
+    {
+      src = element.attribute("href").value();
+    }
+    if (src && strlen(src) > 0)
     {
       // don't leave an empty text block in the list
       BLOCK_STYLE style = currentTextBlock->get_style();
@@ -156,7 +165,7 @@ bool RubbishHtmlParser::enter_node(const pugi::xml_node &element)
     }
     else
     {
-      ESP_LOGE(TAG, "Could not find src attribute");
+      ESP_LOGE(TAG, "Could not find src/href attribute for image");
     }
   }
   else if (matches(tag_name, SKIP_TAGS, NUM_SKIP_TAGS))

@@ -7,6 +7,7 @@ class M5GfxRenderer : public Renderer
 {
 private:
     LGFX_Sprite *framebuffer;
+    int m_refresh_count = 0;  // Track partial refreshes for periodic full refresh
 
 public:
     M5GfxRenderer();
@@ -29,6 +30,7 @@ public:
     virtual void show_img(int x, int y, int width, int height, const uint8_t *img_buffer);
     virtual void clear_screen();
     virtual void flush_display();
+    void flush_display_full();  // Force full refresh to clear ghosting
 
     virtual int get_page_width();
     virtual int get_page_height();
