@@ -54,10 +54,11 @@ typedef enum
 {
   SLEEP_IMAGE_COVER,
   SLEEP_IMAGE_RANDOM,
+  SLEEP_IMAGE_CUSTOM, // Flash-embedded custom image
   SLEEP_IMAGE_OFF
 } SleepImageMode;
 
-SleepImageMode sleep_image_mode = SLEEP_IMAGE_COVER;
+SleepImageMode sleep_image_mode = SLEEP_IMAGE_CUSTOM; // Default to custom cat image
 
 typedef enum
 {
@@ -545,6 +546,10 @@ static void renderReaderMenu(Renderer *renderer)
     {
       sleep_mode_str = "Random";
     }
+    else if (sleep_image_mode == SLEEP_IMAGE_CUSTOM)
+    {
+      sleep_mode_str = "Custom";
+    }
     else if (sleep_image_mode == SLEEP_IMAGE_OFF)
     {
       sleep_mode_str = "Off";
@@ -964,9 +969,11 @@ static void load_app_settings(Renderer *renderer)
   {
     idle_profile = (IdleProfile)idle_bits;
   }
+  ESP_LOGE(TAG, "Settings file sleep_mode=%d (max valid=%d)", s.sleep_mode, SLEEP_IMAGE_OFF);
   if (s.sleep_mode <= SLEEP_IMAGE_OFF)
   {
     sleep_image_mode = (SleepImageMode)s.sleep_mode;
+    ESP_LOGE(TAG, "Sleep mode loaded: %d", (int)sleep_image_mode);
   }
 #ifdef USE_FREETYPE
   if (s.reading_font_px > 0)
@@ -1034,7 +1041,8 @@ static void save_app_settings(Renderer *renderer)
   size_t written = fp.write((uint8_t *)&s, sizeof(s));
   fp.flush();
   fp.close();
-  ESP_LOGE(TAG, "Settings saved: grid_view=%d, written=%d bytes", epub_list_state.use_grid_view, written);
+  ESP_LOGE(TAG, "Settings saved: grid_view=%d, sleep_mode=%d, written=%d bytes",
+           epub_list_state.use_grid_view, (int)sleep_image_mode, written);
 }
 
 static void apply_idle_profile()
@@ -1352,14 +1360,92 @@ static void show_sleep_cover(Renderer *renderer)
 
 static void show_sleep_image(Renderer *renderer)
 {
+  ESP_LOGE(TAG, ">>> show_sleep_image() called, mode=%d (0=Cover,1=Random,2=Custom,3=Off)", (int)sleep_image_mode);
+
   if (sleep_image_mode == SLEEP_IMAGE_OFF)
   {
+    ESP_LOGE(TAG, ">>> Sleep image OFF, skipping");
     return;
   }
 
   if (sleep_image_mode == SLEEP_IMAGE_COVER)
   {
+    ESP_LOGE(TAG, ">>> Sleep image COVER mode");
     show_sleep_cover(renderer);
+    return;
+  }
+
+  // Display flash-embedded custom sleep image
+  if (sleep_image_mode == SLEEP_IMAGE_CUSTOM)
+  {
+    const char *sleep_image_path = "/Sleep/bg.png";
+    ESP_LOGE(TAG, ">>> Displaying custom sleep image from SD: %s", sleep_image_path);
+
+    // Remove from watchdog during sleep image display (file I/O and image loading can be slow)
+    esp_err_t wdt_err = esp_task_wdt_delete(xTaskGetCurrentTaskHandle());
+    bool was_subscribed = (wdt_err == ESP_OK);
+
+    if (!SD.exists(sleep_image_path))
+    {
+      ESP_LOGW(TAG, "Sleep image not found at %s", sleep_image_path);
+      if (was_subscribed)
+        esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+      show_sleep_cover(renderer);
+      return;
+    }
+
+    // Do a full quality clear to reduce ghosting before the sleep image
+    M5.Display.setEpdMode(epd_mode_t::epd_quality);
+    M5.Display.fillScreen(TFT_WHITE);
+    M5.Display.display();
+    M5.Display.waitDisplay();
+
+    // Pre-darken to push the panel toward solid black for the inverted image
+    M5.Display.fillScreen(TFT_BLACK);
+    M5.Display.display();
+    M5.Display.waitDisplay();
+
+    File sleep_fp = SD.open(sleep_image_path, FILE_READ);
+    if (!sleep_fp)
+    {
+      ESP_LOGW(TAG, "Failed to open sleep image: %s", sleep_image_path);
+      if (was_subscribed)
+        esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+      show_sleep_cover(renderer);
+      return;
+    }
+
+    size_t sleep_size = sleep_fp.size();
+    sleep_fp.close();
+    ESP_LOGE(TAG, ">>> Sleep image size: %zu bytes", sleep_size);
+    if (sleep_size == 0)
+    {
+      ESP_LOGW(TAG, "Sleep image is empty: %s", sleep_image_path);
+      if (was_subscribed)
+        esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+      show_sleep_cover(renderer);
+      return;
+    }
+
+    bool success = M5.Display.drawPngFile(SD, sleep_image_path, 0, 0,
+                                          M5.Display.width(), M5.Display.height(),
+                                          0, 0, 0, 0, datum_t::middle_center);
+    M5.Display.display();
+    M5.Display.waitDisplay();
+
+    ESP_LOGE(TAG, ">>> drawPngFile result: %s", success ? "SUCCESS" : "FAILED");
+
+    if (was_subscribed)
+      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+
+    if (!success)
+    {
+      ESP_LOGW(TAG, "Failed to draw custom sleep image, falling back to cover");
+      show_sleep_cover(renderer);
+      return;
+    }
+
+    ESP_LOGE(TAG, ">>> Custom sleep image displayed");
     return;
   }
 
@@ -1773,6 +1859,10 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
           show_status_bar_toast(renderer, "Sleep image: Random");
           break;
         case SLEEP_IMAGE_RANDOM:
+          sleep_image_mode = SLEEP_IMAGE_CUSTOM;
+          show_status_bar_toast(renderer, "Sleep image: Custom");
+          break;
+        case SLEEP_IMAGE_CUSTOM:
           sleep_image_mode = SLEEP_IMAGE_OFF;
           show_status_bar_toast(renderer, "Sleep image: Off");
           break;
@@ -1914,3 +2004,9 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
     break;
   }
 }
+
+
+
+
+
+
