@@ -20,19 +20,36 @@ void M5Paper::power_up()
 void M5Paper::start_filesystem()
 {
     ESP_LOGI(TAG, "Initializing SD card for M5Paper");
-    
+
+    // Add delay before SD card initialization to stabilize power
+    delay(100);
+
     // M5Paper SD 카드 초기화: GPIO 4번 핀 사용, SPI, 25MHz
-    if (!SD.begin(GPIO_NUM_4, SPI, 25000000)) {
-        ESP_LOGE(TAG, "SD Card initialization failed!");
+    // Retry up to 3 times with increasing delays
+    bool sd_mounted = false;
+    for (int retry = 0; retry < 3; retry++) {
+        if (retry > 0) {
+            ESP_LOGW(TAG, "SD Card mount retry %d/3", retry + 1);
+            delay(500 * retry); // Increasing delay: 0ms, 500ms, 1000ms
+        }
+
+        if (SD.begin(GPIO_NUM_4, SPI, 25000000)) {
+            sd_mounted = true;
+            break;
+        }
+    }
+
+    if (!sd_mounted) {
+        ESP_LOGE(TAG, "SD Card initialization failed after 3 attempts!");
         ESP_LOGE(TAG, "Please check:");
         ESP_LOGE(TAG, "- SD card is inserted");
         ESP_LOGE(TAG, "- SD card is formatted as FAT32");
         ESP_LOGE(TAG, "- SD card contacts are clean");
         return;
     }
-    
+
     ESP_LOGI(TAG, "SD Card mounted successfully!");
-    
+
     // SD 카드 정보 출력
     uint64_t cardSize = SD.cardSize() / (1024 * 1024);
     ESP_LOGI(TAG, "SD Card Size: %llu MB", cardSize);

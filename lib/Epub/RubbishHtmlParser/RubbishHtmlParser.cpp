@@ -147,7 +147,10 @@ bool RubbishHtmlParser::enter_node(const pugi::xml_node &element)
         delete currentTextBlock;
         currentTextBlock = nullptr;
       }
-      blocks.push_back(new ImageBlock(m_base_path + src));
+      // Get alt text if available
+      const char *alt = element.attribute("alt").value();
+      std::string alt_text = alt ? alt : "";
+      blocks.push_back(new ImageBlock(m_base_path + src, alt_text));
       // start a new text block - with the same style as before
       startNewTextBlock(style);
     }

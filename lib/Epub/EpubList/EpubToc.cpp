@@ -1,4 +1,7 @@
 #include "EpubToc.h"
+#ifndef UNIT_TEST
+#include <esp_task_wdt.h>
+#endif
 
 static const char *TAG = "PUBINDEX";
 #define PADDING 14
@@ -36,25 +39,43 @@ void EpubToc::prev()
 
 bool EpubToc::load()
 {
-  ESP_LOGI(TAG, "load");
+  ESP_LOGE(TAG, ">>> EpubToc::load() START");
+
+#ifndef UNIT_TEST
+  // Remove from watchdog during TOC load
+  esp_err_t wdt_err = esp_task_wdt_delete(xTaskGetCurrentTaskHandle());
+  bool was_subscribed = (wdt_err == ESP_OK);
+  ESP_LOGI(TAG, "Watchdog disabled for TOC load");
+#endif
 
   if (!epub || epub->get_path() != selected_epub.path)
   {
     renderer->show_busy();
+    vTaskDelay(50); // Allow display update
+    
     delete epub;
 
     epub = new Epub(selected_epub.path);
+    vTaskDelay(10);
+    
     if (!epub->load())
     {
       ESP_LOGE(TAG, "Failed to load epub for index: %s", selected_epub.path);
+#ifndef UNIT_TEST
+      if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+#endif
       return false;
     }
+    vTaskDelay(10);
   }
   // If there is no TOC, signal failure so callers can fall back to
   // opening the book directly without an index.
   if (epub->get_toc_items_count() == 0)
   {
-    ESP_LOGW(TAG, "No TOC entries available for %s", selected_epub.path);
+    ESP_LOGE(TAG, ">>> No TOC entries available for %s - falling back to direct read", selected_epub.path);
+#ifndef UNIT_TEST
+    if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+#endif
     return false;
   }
   state.num_items = epub->get_toc_items_count();
@@ -86,6 +107,16 @@ bool EpubToc::load()
     m_title_blocks.clear();
   }
   ESP_LOGI(TAG, "Epub index loaded");
+  
+#ifndef UNIT_TEST
+  // Re-add to watchdog after TOC load
+  if (was_subscribed)
+  {
+    esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+    ESP_LOGI(TAG, "Watchdog re-enabled after TOC load");
+  }
+#endif
+  
   return true;
 }
 

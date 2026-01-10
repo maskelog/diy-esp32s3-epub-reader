@@ -75,15 +75,15 @@ bool JPEGHelper::get_size(const uint8_t *data, size_t data_size, int *width, int
     return false;
   }
   JPEGDEC jpeg;
-  if (!jpeg.openRAM(const_cast<uint8_t *>(data), static_cast<int>(data_size), JPEGHelper::draw_jpeg_function))
+  // Use NULL callback for get_size - we only need header info, not full decode
+  if (!jpeg.openRAM(const_cast<uint8_t *>(data), static_cast<int>(data_size), NULL))
   {
     ESP_LOGE(TAG, "JPEG open failed (get_size) - %d", jpeg.getLastError());
     return false;
   }
-  jpeg.setUserPointer(this);
   *width = jpeg.getWidth();
   *height = jpeg.getHeight();
-  ESP_LOGI(TAG, "JPEG Decoded - size %d,%d", *width, *height);
+  ESP_LOGI(TAG, "JPEG size read - %dx%d", *width, *height);
   jpeg.close();
   return *width > 0 && *height > 0;
 }
@@ -102,6 +102,7 @@ bool JPEGHelper::render(const uint8_t *data, size_t data_size, Renderer *rendere
   this->renderer = renderer;
   this->y_pos = y_pos;
   this->x_pos = x_pos;
+  this->last_y = -1;
   JPEGDEC jpeg;
   if (!jpeg.openRAM(const_cast<uint8_t *>(data), static_cast<int>(data_size), JPEGHelper::draw_jpeg_function))
   {
@@ -136,8 +137,6 @@ bool JPEGHelper::render(const uint8_t *data, size_t data_size, Renderer *rendere
   return res != 0;
 }
 
-static int last_y = -1;
-
 int JPEGHelper::draw_jpeg_function(JPEGDRAW *pDraw)
 {
   if (!pDraw || !pDraw->pUser || !pDraw->pPixels)
@@ -151,9 +150,9 @@ int JPEGHelper::draw_jpeg_function(JPEGDRAW *pDraw)
     return 0;
   }
 
-  if (pDraw->y != last_y)
+  if (pDraw->y != context->last_y)
   {
-    last_y = pDraw->y;
+    context->last_y = pDraw->y;
     vTaskDelay(1);
   }
 

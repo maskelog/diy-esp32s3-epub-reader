@@ -254,19 +254,23 @@ Epub::Epub(const std::string &path) : m_path(path)
 // load in the meta data for the epub file
 bool Epub::load()
 {
+  ESP_LOGE(TAG, ">>> Epub::load() START: %s", m_path.c_str());
   ZipFile zip(m_path.c_str());
+  ESP_LOGE(TAG, ">>> ZipFile created");
   std::string content_opf_file;
   if (!find_content_opf_file(zip, content_opf_file))
   {
     ESP_LOGE(TAG, "Could not open ePub '%s'", m_path.c_str());
     return false;
   }
+  ESP_LOGE(TAG, ">>> content.opf found: %s", content_opf_file.c_str());
   // get the base path for the content
   m_base_path = content_opf_file.substr(0, content_opf_file.find_last_of('/') + 1);
   if (!parse_content_opf(zip, content_opf_file))
   {
     return false;
   }
+  ESP_LOGE(TAG, ">>> content.opf parsed");
   // The NCX table of contents is optional for our purposes: many modern
   // EPUB3 files use different navigation structures. If parsing the NCX
   // fails (e.g. "No ncx file specified"), log the error inside
@@ -276,6 +280,7 @@ bool Epub::load()
   {
     ESP_LOGW(TAG, "Continuing without NCX table of contents for '%s'", m_path.c_str());
   }
+  ESP_LOGE(TAG, ">>> Epub::load() END");
   return true;
 }
 

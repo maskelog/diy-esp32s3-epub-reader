@@ -35,10 +35,8 @@ private:
 public:
   EpubList(Renderer *renderer, EpubListState &state) : renderer(renderer), state(state)
   {
-    if (!state.is_loaded)
-    {
-      state.use_grid_view = true;
-    }
+    // Don't override use_grid_view here - it should be set by load_app_settings()
+    // Default is already false (List view) from zero-initialization
   }
   ~EpubList()
   {

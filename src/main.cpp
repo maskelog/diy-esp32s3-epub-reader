@@ -1,4 +1,7 @@
 #include <Arduino.h>
+#include <unistd.h>
+#include <esp_sleep.h>
+#include <SD.h>
 #include "config.h"
 #include "EpubList/Epub.h"
 #include "EpubList/EpubList.h"
@@ -8,6 +11,10 @@
 #include "boards/Board.h"
 #include "boards/controls/M5PaperButtonControls.h"
 #include "boards/controls/M5PaperTouchControls.h"
+
+#ifdef BOARD_TYPE_M5_PAPER
+#include <M5Unified.h>
+#endif
 
 #ifdef USE_FREETYPE
 #include "Renderer/FreeTypeFont.h"
@@ -19,6 +26,7 @@
 #define LOG_LEVEL ESP_LOG_NONE
 #endif
 #include <esp_log.h>
+#include <esp_task_wdt.h>
 
 const char *TAG = "main";
 
@@ -35,7 +43,7 @@ EpubListState epub_list_state = {};
 EpubTocState epub_index_state = {};
 
 bool status_bar_visible = true;
-bool open_last_book_on_startup = true;
+bool open_last_book_on_startup = false; // DISABLED: Was causing infinite loop with problematic EPUBs
 bool invert_tap_zones = false;
 bool justify_paragraphs = false;
 
@@ -99,7 +107,7 @@ typedef struct
 #endif
 } AppSettings;
 
-static const char *app_settings_path = "/settings.bin";
+static const char *app_settings_path = "/Books/settings.bin";
 
 void handleEpub(Renderer *renderer, UIAction action);
 void handleEpubList(Renderer *renderer, UIAction action, bool needs_redraw);
@@ -134,13 +142,27 @@ QueueHandle_t ui_queue = nullptr;
 
 void setup()
 {
+  // Temporarily remove this task from watchdog during lengthy initialization
+  esp_err_t wdt_err = esp_task_wdt_delete(xTaskGetCurrentTaskHandle());
+  if (wdt_err != ESP_OK)
+  {
+    // If task is not subscribed, that's fine - just continue
+    ESP_LOGW(TAG, "Failed to delete task from watchdog: %d", wdt_err);
+  }
+
   board = Board::factory();
   board->power_up();
 
+  ESP_LOGI(TAG, "Board powered up");
+
   renderer = board->get_renderer();
+  ESP_LOGI(TAG, "Renderer created");
+
   board->start_filesystem();
+  ESP_LOGI(TAG, "Filesystem started");
 
   load_app_settings(renderer);
+  ESP_LOGI(TAG, "App settings loaded");
 
   battery = board->get_battery();
   if (battery)
@@ -163,35 +185,88 @@ void setup()
   }
   else
   {
+    ESP_LOGE(TAG, ">>> Normal boot - loading library");
     renderer->reset();
     show_library_loading(renderer);
+    ESP_LOGE(TAG, ">>> Library loading screen displayed");
     if (!epub_list)
     {
+      ESP_LOGE(TAG, ">>> Creating EPUB list");
       epub_list = new EpubList(renderer, epub_list_state);
+      ESP_LOGE(TAG, ">>> Loading EPUBs from /Books");
       epub_list->load("/Books");
+      ESP_LOGE(TAG, ">>> EPUB list loaded, count=%d", epub_list_state.num_epubs);
     }
     if (open_last_book_on_startup)
     {
       int last_book_index = find_last_open_book_index();
+      ESP_LOGE(TAG, ">>> open_last_book_on_startup: last_book_index=%d", last_book_index);
       if (last_book_index >= 0)
       {
         epub_list_state.selected_item = last_book_index;
         ui_state = READING_EPUB;
       }
     }
+    ESP_LOGE(TAG, ">>> Calling handleUserInteraction from setup");
     handleUserInteraction(renderer, NONE, true);
+    ESP_LOGE(TAG, ">>> handleUserInteraction returned in setup");
   }
 
+  ESP_LOGE(TAG, ">>> Drawing battery level");
   if (battery)
   {
     draw_battery_level(renderer, battery->get_voltage(), battery->get_percentage());
   }
+  ESP_LOGE(TAG, ">>> touch_controls->render");
   touch_controls->render(renderer);
+  ESP_LOGE(TAG, ">>> renderer->flush_display() START");
   renderer->flush_display();
+  ESP_LOGE(TAG, ">>> renderer->flush_display() END");
+
+  // Re-add this task to watchdog after initialization is complete
+  ESP_LOGE(TAG, ">>> Re-adding watchdog");
+  esp_err_t wdt_add_err = esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+  if (wdt_add_err != ESP_OK)
+  {
+    ESP_LOGW(TAG, "Failed to re-add task to watchdog: %d", wdt_add_err);
+  }
+
+  ESP_LOGE(TAG, ">>> Setup complete!");
 }
+
+static int loop_count = 0;
 
 void loop()
 {
+  // Feed the watchdog to prevent timeout during normal operation
+  esp_task_wdt_reset();
+
+  // Check if sleep was requested from the menu
+  if (g_request_sleep_now)
+  {
+    ESP_LOGE(TAG, ">>> Sleep requested, going to deep sleep");
+    g_request_sleep_now = false;
+
+    // Show sleep image if enabled
+    show_sleep_image(renderer);
+
+    // Prepare board for sleep
+    board->prepare_to_sleep();
+
+    // Setup wakeup source (button press)
+    button_controls->setup_deep_sleep();
+
+    ESP_LOGE(TAG, ">>> Entering deep sleep now");
+
+    // Enter deep sleep
+    esp_deep_sleep_start();
+
+    // Should not reach here
+    return;
+  }
+
+  loop_count++;
+
   button_controls->run();
   touch_controls->run();
 
@@ -257,11 +332,40 @@ static int find_last_open_book_index()
 
 void handleEpub(Renderer *renderer, UIAction action)
 {
+  ESP_LOGE(TAG, ">>> handleEpub START: action=%d", action);
+
+  // Remove from watchdog during EPUB operations (loading/rendering can be slow)
+  esp_err_t wdt_err = esp_task_wdt_delete(xTaskGetCurrentTaskHandle());
+  bool was_subscribed = (wdt_err == ESP_OK);
+
   if (!reader)
   {
+    ESP_LOGE(TAG, ">>> Creating EpubReader for: %s", epub_list_state.epub_list[epub_list_state.selected_item].path);
+    vTaskDelay(10);
+
     reader = new EpubReader(epub_list_state.epub_list[epub_list_state.selected_item], renderer);
     reader->set_justified(justify_paragraphs);
-    reader->load();
+
+    ESP_LOGE(TAG, ">>> Loading EPUB via EpubReader");
+    vTaskDelay(10);
+
+    if (!reader->load())
+    {
+      ESP_LOGE(TAG, ">>> EpubReader::load() FAILED!");
+      delete reader;
+      reader = nullptr;
+      if (was_subscribed)
+      {
+        esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+      }
+      return;
+    }
+
+    ESP_LOGE(TAG, ">>> EpubReader::load() SUCCESS");
+    vTaskDelay(10);
+
+    // Clear screen before rendering new book content
+    renderer->clear_screen();
   }
   switch (action)
   {
@@ -296,16 +400,39 @@ void handleEpub(Renderer *renderer, UIAction action)
       epub_list = new EpubList(renderer, epub_list_state);
     }
     handleEpubList(renderer, NONE, true);
+    // Re-add to watchdog before returning
+    if (was_subscribed)
+    {
+      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+    }
     return;
   case NONE:
   default:
     break;
   }
+
+  ESP_LOGE(TAG, ">>> Rendering page via EpubReader");
+  vTaskDelay(10);
+
   reader->render();
+
+  ESP_LOGE(TAG, ">>> Page rendering complete");
+  vTaskDelay(10);
+
+  // Re-add to watchdog after EPUB operations complete
+  if (was_subscribed)
+  {
+    esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+  }
+  ESP_LOGE(TAG, "<<< handleEpub END");
 }
 
 void handleEpubTableContents(Renderer *renderer, UIAction action, bool needs_redraw)
 {
+  // Remove from watchdog during TOC operations (loading can be slow)
+  esp_err_t wdt_err = esp_task_wdt_delete(xTaskGetCurrentTaskHandle());
+  bool was_subscribed = (wdt_err == ESP_OK);
+
   if (!contents)
   {
     contents = new EpubToc(epub_list_state.epub_list[epub_list_state.selected_item], epub_index_state, renderer);
@@ -341,11 +468,21 @@ void handleEpubTableContents(Renderer *renderer, UIAction action, bool needs_red
       delete reader;
       reader = nullptr;
       ui_state = SELECTING_TABLE_CONTENTS;
+      // Re-add to watchdog before returning
+      if (was_subscribed)
+      {
+        esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+      }
       return;
     }
     // switch to reading the epub
     delete contents;
     contents = nullptr;
+    // Re-add to watchdog before calling handleEpub (which manages its own watchdog)
+    if (was_subscribed)
+    {
+      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+    }
     handleEpub(renderer, NONE);
     return;
   case NONE:
@@ -353,6 +490,12 @@ void handleEpubTableContents(Renderer *renderer, UIAction action, bool needs_red
     break;
   }
   contents->render();
+
+  // Re-add to watchdog after TOC operations complete
+  if (was_subscribed)
+  {
+    esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+  }
 }
 
 static void renderReaderMenu(Renderer *renderer)
@@ -784,22 +927,29 @@ static void show_status_bar_toast(Renderer *renderer, const char *text)
 
 static void load_app_settings(Renderer *renderer)
 {
-  FILE *fp = fopen(app_settings_path, "rb");
+  File fp = SD.open(app_settings_path, FILE_READ);
   if (!fp)
   {
+    ESP_LOGE(TAG, "Settings file not found: %s", app_settings_path);
     return;
   }
   AppSettings s = {};
-  if (fread(&s, sizeof(s), 1, fp) != 1)
+  size_t bytes_read = fp.read((uint8_t *)&s, sizeof(s));
+  fp.close();
+  ESP_LOGE(TAG, "Settings read: %d bytes (expected %d), version=%d, flags=0x%02X",
+           bytes_read, sizeof(s), s.version, s.flags);
+
+  if (bytes_read < 4) // At minimum need version + flags + sleep_mode + reserved
   {
-    fclose(fp);
+    ESP_LOGE(TAG, "Settings file too small, ignoring");
     return;
   }
-  fclose(fp);
   if (s.version != 1)
   {
+    ESP_LOGE(TAG, "Settings version mismatch: %d != 1", s.version);
     return;
   }
+  ESP_LOGE(TAG, "Settings applied: grid_view=%d", (s.flags & 0x2) != 0);
   status_bar_visible = (s.flags & 0x1) != 0;
   epub_list_state.use_grid_view = (s.flags & 0x2) != 0;
   open_last_book_on_startup = (s.flags & 0x4) != 0;
@@ -874,13 +1024,17 @@ static void save_app_settings(Renderer *renderer)
     s.reserved |= 0x4;
   }
   s.reserved |= (((uint8_t)line_spacing_profile) & 0x3) << 3;
-  FILE *fp = fopen(app_settings_path, "wb");
+
+  File fp = SD.open(app_settings_path, FILE_WRITE);
   if (!fp)
   {
+    ESP_LOGE(TAG, "Failed to open settings file for writing: %s", app_settings_path);
     return;
   }
-  fwrite(&s, sizeof(s), 1, fp);
-  fclose(fp);
+  size_t written = fp.write((uint8_t *)&s, sizeof(s));
+  fp.flush();
+  fp.close();
+  ESP_LOGE(TAG, "Settings saved: grid_view=%d, written=%d bytes", epub_list_state.use_grid_view, written);
 }
 
 static void apply_idle_profile()
@@ -948,6 +1102,12 @@ static void apply_line_spacing_profile(Renderer *renderer)
 
 void handleUserInteraction(Renderer *renderer, UIAction ui_action, bool needs_redraw)
 {
+  // Remove from watchdog for entire user interaction handling
+  // This is the top-level handler that calls all other handlers
+  esp_err_t wdt_err = esp_task_wdt_delete(xTaskGetCurrentTaskHandle());
+  bool was_subscribed = (wdt_err == ESP_OK);
+  ESP_LOGE(TAG, ">>> handleUserInteraction START: action=%d, redraw=%d, wdt_removed=%d", ui_action, needs_redraw, was_subscribed);
+
   // Global handling for status bar toggle while reading.
   if (ui_action == TOGGLE_STATUS_BAR && ui_state == READING_EPUB)
   {
@@ -957,6 +1117,8 @@ void handleUserInteraction(Renderer *renderer, UIAction ui_action, bool needs_re
     // pick up the new visibility on the next flush.
     handleEpub(renderer, NONE);
     show_status_bar_toast(renderer, status_bar_visible ? "Status bar ON" : "Status bar OFF");
+    if (was_subscribed)
+      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     return;
   }
 
@@ -968,6 +1130,8 @@ void handleUserInteraction(Renderer *renderer, UIAction ui_action, bool needs_re
     reader_menu_advanced = true;
     reader_menu_selected = 0;
     renderReaderMenu(renderer);
+    if (was_subscribed)
+      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     return;
   }
 
@@ -996,6 +1160,11 @@ void handleUserInteraction(Renderer *renderer, UIAction ui_action, bool needs_re
     handleEpubList(renderer, ui_action, needs_redraw);
     break;
   }
+
+  // Re-add to watchdog after user interaction handling completes
+  ESP_LOGE(TAG, "<<< handleUserInteraction END: re-adding wdt=%d", was_subscribed);
+  if (was_subscribed)
+    esp_task_wdt_add(xTaskGetCurrentTaskHandle());
 }
 
 void draw_battery_level(Renderer *renderer, float voltage, float percentage)
@@ -1011,6 +1180,24 @@ void draw_battery_level(Renderer *renderer, float voltage, float percentage)
 
   // clear the margin so we can draw the battery in the right place
   renderer->set_margin_top(0);
+
+  // Draw page number on the left side when reading
+  if (ui_state == READING_EPUB && epub_list_state.selected_item >= 0 &&
+      epub_list_state.selected_item < epub_list_state.num_epubs)
+  {
+    EpubListItem &item = epub_list_state.epub_list[epub_list_state.selected_item];
+    if (item.pages_in_current_section > 0)
+    {
+      char page_str[32];
+      snprintf(page_str, sizeof(page_str), "S%d  %d/%d",
+               item.current_section + 1,
+               item.current_page + 1,
+               item.pages_in_current_section);
+      renderer->draw_text(10, 10, page_str, false, false);
+    }
+  }
+
+  // Draw battery on the right side
   int width = 40;
   int height = 20;
   int margin_right = 5;
@@ -1058,6 +1245,10 @@ static void show_library_loading(Renderer *renderer)
 
 static void show_sleep_cover(Renderer *renderer)
 {
+  // Remove from watchdog during sleep cover display (EPUB/image loading can be slow)
+  esp_err_t wdt_err = esp_task_wdt_delete(xTaskGetCurrentTaskHandle());
+  bool was_subscribed = (wdt_err == ESP_OK);
+
   int book_index = -1;
   if (epub_list_state.num_epubs > 0)
   {
@@ -1073,18 +1264,24 @@ static void show_sleep_cover(Renderer *renderer)
 
   if (book_index < 0)
   {
+    if (was_subscribed)
+      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     return;
   }
 
   EpubListItem &item = epub_list_state.epub_list[book_index];
   if (item.cover_path[0] == '\0')
   {
+    if (was_subscribed)
+      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     return;
   }
 
   Epub epub(item.path);
   if (!epub.load())
   {
+    if (was_subscribed)
+      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     return;
   }
 
@@ -1093,15 +1290,44 @@ static void show_sleep_cover(Renderer *renderer)
   if (!image_data || image_data_size == 0)
   {
     free(image_data);
+    if (was_subscribed)
+      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     return;
   }
 
+#ifdef BOARD_TYPE_M5_PAPER
+  // Use M5GFX's drawJpg directly for fast rendering on M5Paper
+  ESP_LOGI("main", "Displaying sleep cover from: %s (%zu bytes)", item.cover_path, image_data_size);
+
+  vTaskDelay(1);
+  M5.Display.fillScreen(0xFF); // White
+
+  bool success = M5.Display.drawJpg(image_data, image_data_size, 0, 0,
+                                    M5.Display.width(), M5.Display.height());
+
+  free(image_data);
+
+  if (!success)
+  {
+    ESP_LOGW("main", "Failed to decode sleep cover image");
+    if (was_subscribed)
+      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+    return;
+  }
+
+  ESP_LOGI("main", "Sleep cover displayed successfully");
+  if (was_subscribed)
+    esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+#else
+  // Fallback to renderer-based drawing for other boards
   int img_w = 0;
   int img_h = 0;
   bool can_render = renderer->get_image_size(item.cover_path, image_data, image_data_size, &img_w, &img_h);
   if (!can_render || img_w <= 0 || img_h <= 0)
   {
     free(image_data);
+    if (was_subscribed)
+      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     return;
   }
 
@@ -1119,6 +1345,9 @@ static void show_sleep_cover(Renderer *renderer)
   renderer->set_image_placeholder_enabled(true);
   free(image_data);
   renderer->flush_display();
+  if (was_subscribed)
+    esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+#endif
 }
 
 static void show_sleep_image(Renderer *renderer)
@@ -1139,6 +1368,10 @@ static void show_sleep_image(Renderer *renderer)
     return;
   }
 
+  // Remove from watchdog during sleep image display (file I/O and image loading can be slow)
+  esp_err_t wdt_err = esp_task_wdt_delete(xTaskGetCurrentTaskHandle());
+  bool was_subscribed = (wdt_err == ESP_OK);
+
   const char *pics_dir = nullptr;
   DIR *dir = nullptr;
   const char *candidates[] = {"/sd/pic"};
@@ -1154,6 +1387,8 @@ static void show_sleep_image(Renderer *renderer)
   if (!dir)
   {
     ESP_LOGW("main", "Sleep image directory not found: %s", "/sd/pic");
+    if (was_subscribed)
+      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     show_sleep_cover(renderer);
     return;
   }
@@ -1202,12 +1437,17 @@ static void show_sleep_image(Renderer *renderer)
         snprintf(selected_path, sizeof(selected_path), "%s/%s", pics_dir, ent->d_name);
       }
     }
+
+    // Yield to watchdog on each iteration to prevent timeouts
+    vTaskDelay(1);
   }
   closedir(dir);
 
   if (image_count == 0 || selected_path[0] == '\0')
   {
     ESP_LOGW("main", "No image files found in %s", pics_dir);
+    if (was_subscribed)
+      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     show_sleep_cover(renderer);
     return;
   }
@@ -1217,6 +1457,8 @@ static void show_sleep_image(Renderer *renderer)
   if (!fp)
   {
     ESP_LOGW("main", "Sleep image not found at %s", sleep_image_path);
+    if (was_subscribed)
+      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     show_sleep_cover(renderer);
     return;
   }
@@ -1224,6 +1466,8 @@ static void show_sleep_image(Renderer *renderer)
   if (fseek(fp, 0, SEEK_END) != 0)
   {
     fclose(fp);
+    if (was_subscribed)
+      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     show_sleep_cover(renderer);
     return;
   }
@@ -1232,12 +1476,16 @@ static void show_sleep_image(Renderer *renderer)
   {
     fclose(fp);
     ESP_LOGW("main", "Sleep image file has invalid size: %s", sleep_image_path);
+    if (was_subscribed)
+      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     show_sleep_cover(renderer);
     return;
   }
   if (fseek(fp, 0, SEEK_SET) != 0)
   {
     fclose(fp);
+    if (was_subscribed)
+      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     show_sleep_cover(renderer);
     return;
   }
@@ -1247,6 +1495,8 @@ static void show_sleep_image(Renderer *renderer)
   {
     fclose(fp);
     ESP_LOGW("main", "Failed to allocate memory for sleep image");
+    if (was_subscribed)
+      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     show_sleep_cover(renderer);
     return;
   }
@@ -1257,17 +1507,55 @@ static void show_sleep_image(Renderer *renderer)
   {
     free(data);
     ESP_LOGW("main", "Failed to read full sleep image");
+    if (was_subscribed)
+      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     show_sleep_cover(renderer);
     return;
   }
 
+#ifdef BOARD_TYPE_M5_PAPER
+  // Use M5GFX's drawJpg directly - much faster and more reliable than JPEGDEC
+  // This matches the approach used in the working m5book text reader
+  ESP_LOGI("main", "Displaying sleep image: %s (%ld bytes)", sleep_image_path, size);
+
+  vTaskDelay(1);
+  // Clear screen and draw image
+  M5.Display.fillScreen(0xFF); // White
+
+  bool success = M5.Display.drawJpg(data, (size_t)size, 0, 0,
+                                    M5.Display.width(), M5.Display.height());
+
+  free(data);
+
+  if (!success)
+  {
+    ESP_LOGW("main", "Failed to decode sleep image, falling back to cover");
+    if (was_subscribed)
+      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+    show_sleep_cover(renderer);
+    return;
+  }
+
+  ESP_LOGI("main", "Sleep image displayed successfully");
+  if (was_subscribed)
+    esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+#else
+  // Fallback to renderer-based drawing for other boards
+  // Yield before potentially expensive image decode operation
+  vTaskDelay(1);
+
   int img_w = 0;
   int img_h = 0;
   bool can_render = renderer->get_image_size(sleep_image_path, data, (size_t)size, &img_w, &img_h);
+
+  // Yield after image decode
+  vTaskDelay(1);
   if (!can_render || img_w <= 0 || img_h <= 0)
   {
     free(data);
     ESP_LOGW("main", "Sleep image decode failed: %s", sleep_image_path);
+    if (was_subscribed)
+      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     show_sleep_cover(renderer);
     return;
   }
@@ -1285,10 +1573,21 @@ static void show_sleep_image(Renderer *renderer)
   // For sleep images we do not want to show the generic cover placeholder
   // if decoding fails; just leave the screen as-is in that case.
   renderer->set_image_placeholder_enabled(false);
+
+  // Yield before drawing the image (potentially expensive operation)
+  vTaskDelay(1);
+
   renderer->draw_image(sleep_image_path, data, (size_t)size, 0, 0, width, height);
   renderer->set_image_placeholder_enabled(true);
   free(data);
+
+  // Yield after drawing before display flush
+  vTaskDelay(1);
+
   renderer->flush_display();
+  if (was_subscribed)
+    esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+#endif
 }
 
 void handleEpubList(Renderer *renderer, UIAction action, bool needs_redraw)
@@ -1324,6 +1623,7 @@ void handleEpubList(Renderer *renderer, UIAction action, bool needs_redraw)
     contents = new EpubToc(epub_list_state.epub_list[epub_list_state.selected_item], epub_index_state, renderer);
     if (!contents->load())
     {
+      ESP_LOGE(TAG, ">>> TOC load failed, falling back to direct EPUB read");
       delete contents;
       contents = nullptr;
       ui_state = READING_EPUB;

@@ -12,6 +12,7 @@ private:
   Renderer *renderer;
   int x_pos;
   int y_pos;
+  int last_y;
 
   static int draw_jpeg_function(JPEGDRAW *pDraw);
 

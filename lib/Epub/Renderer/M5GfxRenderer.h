@@ -36,4 +36,8 @@ public:
     virtual int get_line_height();
 
     virtual void reset();
+
+    // Override image methods to use M5GFX's fast drawJpg
+    virtual void draw_image(const std::string &filename, const uint8_t *data, size_t data_size, int x, int y, int width, int height);
+    virtual bool get_image_size(const std::string &filename, const uint8_t *data, size_t data_size, int *width, int *height);
 };

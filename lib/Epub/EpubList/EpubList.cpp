@@ -10,6 +10,7 @@
   #include <freertos/FreeRTOS.h>
   #include <freertos/task.h>
   #include <esp_log.h>
+  #include <esp_task_wdt.h>
 #else
   #define vTaskDelay(t)
   #define ESP_LOGE(args...)
@@ -54,7 +55,16 @@ bool EpubList::load(const char *path)
     ESP_LOGI(TAG, "Loaded EPUB index from %s", index_path);
     return true;
   }
+  
+#ifndef UNIT_TEST
+  // Remove from watchdog for entire load process (can take many seconds)
+  esp_err_t wdt_err = esp_task_wdt_delete(xTaskGetCurrentTaskHandle());
+  bool was_subscribed = (wdt_err == ESP_OK);
+  ESP_LOGI(TAG, "Watchdog disabled for library load");
+#endif
+  
   renderer->show_busy();
+  vTaskDelay(50); // Allow display update
   // trigger a proper redraw
   state.previous_rendered_page = -1;
   // read in the list of epubs
@@ -96,81 +106,22 @@ bool EpubList::load(const char *path)
       {
         continue;
       }
-      ESP_LOGD(TAG, "Loading epub %s", file.name());
+      ESP_LOGE(TAG, ">>> Loading epub %d: %s", state.num_epubs + 1, file.name());
+
+      // Yield before loading each EPUB to prevent watchdog timeout
+      vTaskDelay(10);
+
+      ESP_LOGE(TAG, ">>> Creating Epub object");
       Epub *epub = new Epub(base_path + file.name());
+      ESP_LOGE(TAG, ">>> Calling epub->load()");
       if (epub->load())
       {
+        ESP_LOGE(TAG, "  EPUB loaded successfully: %s", file.name());
         strncpy(state.epub_list[state.num_epubs].path, epub->get_path().c_str(), MAX_PATH_SIZE);
         strncpy(state.epub_list[state.num_epubs].title, replace_html_entities(epub->get_title()).c_str(), MAX_TITLE_SIZE);
-        const std::string &cover_item = epub->get_cover_image_item();
-        size_t cover_data_size = 0;
-        uint8_t *cover_data = nullptr;
-        bool valid_cover = false;
-        bool skip_cover = false;
-        if (!cover_item.empty())
-        {
-          const char *cover_ext = strrchr(cover_item.c_str(), '.');
-          if (cover_ext)
-          {
-            char e0 = tolower(cover_ext[1]);
-            char e1 = tolower(cover_ext[2]);
-            char e2 = tolower(cover_ext[3]);
-            char e3 = tolower(cover_ext[4]);
-            bool is_jpg = (e0 == 'j' && e1 == 'p' && e2 == 'g' && cover_ext[4] == '\0');
-            bool is_jpeg = (e0 == 'j' && e1 == 'p' && e2 == 'e' && e3 == 'g' && cover_ext[5] == '\0');
-            if (is_jpg || is_jpeg)
-            {
-              state.epub_list[state.num_epubs].cover_path[0] = '\0';
-              skip_cover = true;
-            }
-          }
-          if (!skip_cover)
-          {
-          // Copy the declared cover path into the persisted state, then
-          // validate that the image can actually be decoded. If anything
-          // about the cover is invalid (missing resource, corrupt data,
-          // or nonsensical dimensions), treat it as "no cover" so the
-          // UI will render a safe title-only card instead of attempting
-          // to draw a bad image later in the grid/list or sleep cover.
-          strncpy(state.epub_list[state.num_epubs].cover_path, cover_item.c_str(), MAX_PATH_SIZE);
-          state.epub_list[state.num_epubs].cover_path[MAX_PATH_SIZE - 1] = '\0';
-
-          cover_data = epub->get_item_contents(cover_item, &cover_data_size);
-          if (cover_data && cover_data_size > 0)
-          {
-            int cw = 0;
-            int ch = 0;
-            if (renderer->get_image_size(cover_item, cover_data, cover_data_size, &cw, &ch) && cw > 0 && ch > 0)
-            {
-              // Reject covers that are implausibly large relative to the
-              // device resolution. Extremely high-resolution or corrupt
-              // images can cause slow, oversized rendering in the grid.
-              int page_w = renderer->get_page_width();
-              int page_h = renderer->get_page_height();
-              int max_dim = std::max(page_w, page_h);
-              if (max_dim <= 0)
-              {
-                max_dim = 4000; // conservative upper bound
-              }
-              int max_allowed = max_dim * 4; // allow up to 4x screen size
-              if (cw <= max_allowed && ch <= max_allowed)
-              {
-                valid_cover = true;
-              }
-            }
-          }
-          if (!valid_cover)
-          {
-            ESP_LOGW(TAG, "Invalid cover for '%s', using title-only card instead", state.epub_list[state.num_epubs].title);
-            state.epub_list[state.num_epubs].cover_path[0] = '\0';
-          }
-          }
-        }
-        else
-        {
-          state.epub_list[state.num_epubs].cover_path[0] = '\0';
-        }
-        free(cover_data);
+        // DISABLED: Cover image processing causes watchdog timeouts
+        // Always set cover_path to empty - no cover images
+        state.epub_list[state.num_epubs].cover_path[0] = '\0';
         state.num_epubs++;
         if (state.num_epubs == MAX_EPUB_LIST_SIZE)
         {
@@ -183,6 +134,9 @@ bool EpubList::load(const char *path)
         ESP_LOGE(TAG, "Failed to load epub %s", file.name());
       }
       delete epub;
+
+      // Yield to watchdog after processing each EPUB to prevent timeouts
+      vTaskDelay(1);
     }
     dir.close();
     std::sort(
@@ -217,16 +171,36 @@ bool EpubList::load(const char *path)
     m_title_blocks.resize(state.num_epubs, nullptr);
   }
   save_index(index_path);
+  
+#ifndef UNIT_TEST
+  // Re-add to watchdog after load completes
+  if (was_subscribed)
+  {
+    esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+    ESP_LOGI(TAG, "Watchdog re-enabled after library load");
+  }
+#endif
+  
   return true;
 }
 
 void EpubList::render()
 {
-  ESP_LOGD(TAG, "Rendering EPUB list");
+  ESP_LOGE(TAG, ">>> EpubList::render() START, num_epubs=%d, selected=%d", state.num_epubs, state.selected_item);
+  
+#ifndef UNIT_TEST
+  // Remove from watchdog during render (image loading can be slow)
+  esp_err_t wdt_err = esp_task_wdt_delete(xTaskGetCurrentTaskHandle());
+  bool was_subscribed = (wdt_err == ESP_OK);
+#endif
+  
   int page_width = renderer->get_page_width();
   int page_height = renderer->get_page_height();
   if (page_width <= 0 || page_height <= 0)
   {
+#ifndef UNIT_TEST
+    if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+#endif
     return;
   }
 
@@ -272,7 +246,13 @@ void EpubList::render()
   {
     int cell_width = page_width / EPUB_GRID_COLUMNS;
     int cell_height = content_height / EPUB_GRID_ROWS;
-    ESP_LOGD(TAG, "Grid cell size is %dx%d", cell_width, cell_height);
+    ESP_LOGI(TAG, "Grid cell size is %dx%d, rendering page %d (items %d-%d)",
+             cell_width, cell_height, current_page, start_index,
+             std::min(start_index + items_per_page - 1, state.num_epubs - 1));
+
+    // Yield before starting to render grid
+    vTaskDelay(20);
+
     for (int i = start_index; i < start_index + items_per_page && i < state.num_epubs; i++)
     {
       int index_in_page = i - start_index;
@@ -284,8 +264,16 @@ void EpubList::render()
       // do we need to draw a new page of items?
       if (current_page != state.previous_rendered_page)
       {
-        ESP_LOGD(TAG, "Rendering item %d", i);
-        Epub epub(state.epub_list[i].path);
+        ESP_LOGE(TAG, "Grid: Rendering item %d/%d: %s", i + 1, state.num_epubs, state.epub_list[i].title);
+
+        // Yield before loading each EPUB's cover to prevent watchdog timeout
+        vTaskDelay(50);
+
+        // TEMPORARILY DISABLED: Cover image loading causes watchdog timeouts
+        // Always show title card instead of cover image for stability
+        
+        vTaskDelay(10);
+
         int available_height = cell_height - PADDING * 2;
         if (available_height < 1)
         {
@@ -300,37 +288,7 @@ void EpubList::render()
         int image_xpos = cell_x + (cell_width - image_width) / 2;
         int image_ypos = cell_y + (cell_height - image_height) / 2;
 
-        bool needs_title_card = false;
-        size_t image_data_size = 0;
-        uint8_t *image_data = nullptr;
-
-        if (state.epub_list[i].cover_path[0] != '\0')
-        {
-          image_data = epub.get_item_contents(state.epub_list[i].cover_path, &image_data_size);
-          bool can_render = false;
-          if (image_data && image_data_size > 0)
-          {
-            int dummy_w = 0;
-            int dummy_h = 0;
-            can_render = renderer->get_image_size(state.epub_list[i].cover_path, image_data, image_data_size, &dummy_w, &dummy_h);
-          }
-          if (can_render)
-          {
-            renderer->set_image_placeholder_enabled(false);
-            renderer->draw_image(state.epub_list[i].cover_path, image_data, image_data_size, image_xpos, image_ypos, image_width, image_height);
-            renderer->set_image_placeholder_enabled(true);
-          }
-          else
-          {
-            needs_title_card = true;
-          }
-        }
-        else
-        {
-          needs_title_card = true;
-        }
-
-        if (needs_title_card)
+        // Always show title card (cover images disabled for stability)
         {
           // Draw a simple bordered container with the book title only.
           int card_x = image_xpos;
@@ -353,10 +311,11 @@ void EpubList::render()
             }
           }
         }
-        free(image_data);
-        // Yield briefly while rendering a page of covers so the main
-        // task does not starve the watchdog when decoding many JPEGs.
-        vTaskDelay(1);
+
+        // Yield after rendering each item
+        vTaskDelay(10);
+
+        ESP_LOGI(TAG, "  Item %d rendered", i + 1);
       }
 
       int sel_x = cell_x + 2;
@@ -391,52 +350,36 @@ void EpubList::render()
   else
   {
     int cell_height = content_height / EPUB_LIST_ITEMS_PER_PAGE;
-    ESP_LOGD(TAG, "Cell height is %d", cell_height);
+    ESP_LOGI(TAG, "List cell height is %d, rendering page %d (items %d-%d)",
+             cell_height, current_page, start_index,
+             std::min(start_index + EPUB_LIST_ITEMS_PER_PAGE - 1, state.num_epubs - 1));
+
+    // Yield before starting to render list
+    vTaskDelay(20);
+
     int ypos = 0;
     for (int i = start_index; i < start_index + EPUB_LIST_ITEMS_PER_PAGE && i < state.num_epubs; i++)
     {
       // do we need to draw a new page of items?
       if (current_page != state.previous_rendered_page)
       {
-        ESP_LOGI(TAG, "Rendering item %d", i);
-        Epub epub(state.epub_list[i].path);
-        // draw the cover page
+        ESP_LOGE(TAG, "List: Rendering item %d/%d: %s", i + 1, state.num_epubs, state.epub_list[i].title);
+
+        // Yield before loading each EPUB's cover to prevent watchdog timeout
+        vTaskDelay(50);
+
+        // TEMPORARILY DISABLED: Cover image loading causes watchdog timeouts
+        // Always show title card instead of cover image for stability
+        
+        vTaskDelay(10);
+
+        // draw the cover page area (now just title card)
         int image_xpos = PADDING;
         int image_ypos = ypos + PADDING;
         int image_height = cell_height - PADDING * 2;
         int image_width = 2 * image_height / 3;
-        size_t image_data_size = 0;
-        uint8_t *image_data = nullptr;
 
-        bool needs_title_card = false;
-
-        if (state.epub_list[i].cover_path[0] != '\0')
-        {
-          image_data = epub.get_item_contents(state.epub_list[i].cover_path, &image_data_size);
-          bool can_render = false;
-          if (image_data && image_data_size > 0)
-          {
-            int dummy_w = 0;
-            int dummy_h = 0;
-            can_render = renderer->get_image_size(state.epub_list[i].cover_path, image_data, image_data_size, &dummy_w, &dummy_h);
-          }
-          if (can_render)
-          {
-            renderer->set_image_placeholder_enabled(false);
-            renderer->draw_image(state.epub_list[i].cover_path, image_data, image_data_size, image_xpos, image_ypos, image_width, image_height);
-            renderer->set_image_placeholder_enabled(true);
-          }
-          else
-          {
-            needs_title_card = true;
-          }
-        }
-        else
-        {
-          needs_title_card = true;
-        }
-
-        if (needs_title_card)
+        // Always show title card (cover images disabled for stability)
         {
           // Draw a bordered title container in place of the cover.
           int card_x = image_xpos;
@@ -459,7 +402,6 @@ void EpubList::render()
             }
           }
         }
-        free(image_data);
         // draw the title
         int text_xpos = image_xpos + image_width + PADDING;
         int text_ypos = ypos + PADDING / 2;
@@ -472,7 +414,7 @@ void EpubList::render()
           title_block = new TextBlock(LEFT_ALIGN);
           // Render library titles in bold in the list view.
           title_block->add_span(state.epub_list[i].title, true, false);
-          title_block->layout(renderer, &epub, text_width);
+          title_block->layout(renderer, nullptr, text_width);
           m_title_blocks[i] = title_block;
         }
         // work out the height of the title
@@ -659,6 +601,16 @@ void EpubList::render()
 
   state.previous_selected_item = state.selected_item;
   state.previous_rendered_page = current_page;
+
+  ESP_LOGE(TAG, "<<< EpubList::render() END, page=%d", current_page);
+  
+#ifndef UNIT_TEST
+  // Re-add to watchdog after render completes
+  if (was_subscribed)
+  {
+    esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+  }
+#endif
 }
 
 // Binary index format:
