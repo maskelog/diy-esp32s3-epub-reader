@@ -47,7 +47,7 @@ bool open_last_book_on_startup = false; // DISABLED: Was causing infinite loop w
 bool invert_tap_zones = false;
 bool justify_paragraphs = false;
 
-const int READER_MENU_BASIC_ITEMS = 6;
+const int READER_MENU_BASIC_ITEMS = 7;
 const int READER_MENU_ADVANCED_ITEMS = 12;
 
 typedef enum
@@ -109,6 +109,7 @@ typedef struct
 } AppSettings;
 
 static const char *app_settings_path = "/Books/settings.bin";
+static const char *books_index_path = "/Books/BOOKS.IDX";
 
 void handleEpub(Renderer *renderer, UIAction action);
 void handleEpubList(Renderer *renderer, UIAction action, bool needs_redraw);
@@ -331,6 +332,7 @@ static int find_last_open_book_index()
   return -1;
 }
 
+
 void handleEpub(Renderer *renderer, UIAction action)
 {
   ESP_LOGE(TAG, ">>> handleEpub START: action=%d", action);
@@ -344,7 +346,13 @@ void handleEpub(Renderer *renderer, UIAction action)
     ESP_LOGE(TAG, ">>> Creating EpubReader for: %s", epub_list_state.epub_list[epub_list_state.selected_item].path);
     vTaskDelay(10);
 
-    reader = new EpubReader(epub_list_state.epub_list[epub_list_state.selected_item], renderer);
+    EpubListItem &item = epub_list_state.epub_list[epub_list_state.selected_item];
+    if (item.bookmark_set)
+    {
+      item.current_section = item.bookmark_section;
+      item.current_page = item.bookmark_page;
+    }
+    reader = new EpubReader(item, renderer);
     reader->set_justified(justify_paragraphs);
 
     ESP_LOGE(TAG, ">>> Loading EPUB via EpubReader");
@@ -419,6 +427,7 @@ void handleEpub(Renderer *renderer, UIAction action)
 
   ESP_LOGE(TAG, ">>> Page rendering complete");
   vTaskDelay(10);
+
 
   // Re-add to watchdog after EPUB operations complete
   if (was_subscribed)
@@ -521,12 +530,13 @@ static void renderReaderMenu(Renderer *renderer)
   {
     items_total = READER_MENU_BASIC_ITEMS;
     labels[0] = "Return to book";
-    labels[1] = "Table of contents";
-    labels[2] = "Back to library";
-    labels[3] = "More";
+    labels[1] = "Bookmark";
+    labels[2] = "Table of contents";
+    labels[3] = "Back to library";
+    labels[4] = "More";
     // Use ASCII-friendly "icon" prefixes so they render on limited fonts.
-    labels[4] = "[R] Refresh screen";
-    labels[5] = "[Zz] Sleep";
+    labels[5] = "[R] Refresh screen";
+    labels[6] = "[Zz] Sleep";
   }
   else
   {
@@ -1197,10 +1207,20 @@ void draw_battery_level(Renderer *renderer, float voltage, float percentage)
     if (item.pages_in_current_section > 0)
     {
       char page_str[32];
-      snprintf(page_str, sizeof(page_str), "S%d  %d/%d",
-               item.current_section + 1,
-               item.current_page + 1,
-               item.pages_in_current_section);
+      if (item.bookmark_set)
+      {
+        snprintf(page_str, sizeof(page_str), "S%d  %d/%d [B]",
+                 item.current_section + 1,
+                 item.current_page + 1,
+                 item.pages_in_current_section);
+      }
+      else
+      {
+        snprintf(page_str, sizeof(page_str), "S%d  %d/%d",
+                 item.current_section + 1,
+                 item.current_page + 1,
+                 item.pages_in_current_section);
+      }
       renderer->draw_text(10, 10, page_str, false, false);
     }
   }
@@ -1761,6 +1781,27 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
       }
       else if (reader_menu_selected == 1)
       {
+        if (epub_list_state.selected_item >= 0 && epub_list_state.selected_item < epub_list_state.num_epubs)
+        {
+          EpubListItem &item = epub_list_state.epub_list[epub_list_state.selected_item];
+          item.bookmark_section = item.current_section;
+          item.bookmark_page = item.current_page;
+          item.bookmark_set = true;
+          if (epub_list)
+          {
+            epub_list->save_index(books_index_path);
+          }
+          show_status_bar_toast(renderer, "Bookmark set");
+        }
+        ui_state = READING_EPUB;
+        renderer->clear_screen();
+        if (reader)
+        {
+          reader->render();
+        }
+      }
+      else if (reader_menu_selected == 2)
+      {
         ui_state = SELECTING_TABLE_CONTENTS;
         if (contents)
         {
@@ -1783,7 +1824,7 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
         contents->set_needs_redraw();
         handleEpubTableContents(renderer, NONE, true);
       }
-      else if (reader_menu_selected == 2)
+      else if (reader_menu_selected == 3)
       {
         // Back to library: force a full-screen refresh and show the
         // same "Book library is loading" splash used on cold boot
@@ -1798,13 +1839,13 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
         }
         handleEpubList(renderer, NONE, true);
       }
-      else if (reader_menu_selected == 3)
+      else if (reader_menu_selected == 4)
       {
         reader_menu_advanced = true;
         reader_menu_selected = 0;
         renderReaderMenu(renderer);
       }
-      else if (reader_menu_selected == 4)
+      else if (reader_menu_selected == 5)
       {
         // Full screen refresh of the current reading page to
         // mitigate ghosting.
@@ -1815,7 +1856,7 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
           reader->render();
         }
       }
-      else if (reader_menu_selected == 5)
+      else if (reader_menu_selected == 6)
       {
         // Request immediate sleep; main_task's event loop will
         // see this flag and break out to the sleep sequence.

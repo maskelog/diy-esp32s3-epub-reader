@@ -48,12 +48,29 @@ bool EpubList::load(const char *path)
     ESP_LOGD(TAG, "Already loaded books");
     return true;
   }
+  if (SD.cardType() == CARD_NONE)
+  {
+    ESP_LOGE(TAG, "SD card not mounted; skipping library load");
+    return false;
+  }
   // Use an 8.3-safe filename so the FAT implementation can always create it.
   const char *index_path = "/Books/BOOKS.IDX";
   if (load_index(path, index_path))
   {
     ESP_LOGI(TAG, "Loaded EPUB index from %s", index_path);
+    state.previous_rendered_page = -1;
+    state.previous_selected_item = -1;
+    if (m_title_blocks.size() < static_cast<size_t>(state.num_epubs))
+    {
+      m_title_blocks.resize(state.num_epubs, nullptr);
+    }
     return true;
+  }
+  else
+  {
+    // If the index is corrupt or from an unsupported version, remove it
+    // so a fresh scan can rebuild it cleanly.
+    SD.remove(index_path);
   }
   
 #ifndef UNIT_TEST
@@ -634,33 +651,84 @@ bool EpubList::load_index(const char *books_path, const char *index_path)
     return false;
   }
   const uint32_t EXPECTED_MAGIC = 0x58494245; // 'EBIX'
-  if (magic != EXPECTED_MAGIC || version != 1 || count == 0 || count > MAX_EPUB_LIST_SIZE)
+  if (magic != EXPECTED_MAGIC || (version != 1 && version != 2) || count == 0 || count > MAX_EPUB_LIST_SIZE)
   {
     fp.close();
     return false;
   }
-  if (fp.read((uint8_t *)state.epub_list, sizeof(EpubListItem) * count) != sizeof(EpubListItem) * count)
+  if (version == 1)
   {
-    fp.close();
-    return false;
+    struct EpubListItemV1
+    {
+      char path[MAX_PATH_SIZE];
+      char title[MAX_TITLE_SIZE];
+      uint16_t current_section;
+      uint16_t current_page;
+      uint16_t pages_in_current_section;
+      char cover_path[MAX_PATH_SIZE];
+    };
+    EpubListItemV1 *tmp = static_cast<EpubListItemV1 *>(
+        malloc(sizeof(EpubListItemV1) * count));
+    if (!tmp)
+    {
+      fp.close();
+      return false;
+    }
+    if (fp.read((uint8_t *)tmp, sizeof(EpubListItemV1) * count) != sizeof(EpubListItemV1) * count)
+    {
+      free(tmp);
+      fp.close();
+      return false;
+    }
+    for (int i = 0; i < count; i++)
+    {
+      EpubListItem &dst = state.epub_list[i];
+      memset(&dst, 0, sizeof(dst));
+      memcpy(dst.path, tmp[i].path, MAX_PATH_SIZE);
+      memcpy(dst.title, tmp[i].title, MAX_TITLE_SIZE);
+      dst.current_section = tmp[i].current_section;
+      dst.current_page = tmp[i].current_page;
+      dst.pages_in_current_section = tmp[i].pages_in_current_section;
+      memcpy(dst.cover_path, tmp[i].cover_path, MAX_PATH_SIZE);
+      dst.bookmark_set = false;
+      dst.bookmark_section = 0;
+      dst.bookmark_page = 0;
+    }
+    free(tmp);
+  }
+  else
+  {
+    if (fp.read((uint8_t *)state.epub_list, sizeof(EpubListItem) * count) != sizeof(EpubListItem) * count)
+    {
+      fp.close();
+      return false;
+    }
   }
   fp.close();
 
-  // Quick validation: count EPUB-like files in books_path and ensure it matches
+  // Quick validation: count EPUB-like files in books_path via SD.h to avoid dirent stack use.
   int dir_count = 0;
-  DIR *dir = opendir(books_path);
+  File dir = SD.open(books_path);
   if (dir)
   {
-    struct dirent *ent;
-    while ((ent = readdir(dir)) != NULL)
+    File f;
+    while ((f = dir.openNextFile()))
     {
-      if (ent->d_name[0] == '.' || ent->d_name[0] == '_' || ent->d_type == DT_DIR)
+      if (f.isDirectory())
       {
+        f.close();
         continue;
       }
-      const char *dot = strrchr(ent->d_name, '.');
+      const char *name = f.name();
+      if (!name || name[0] == '.' || name[0] == '_')
+      {
+        f.close();
+        continue;
+      }
+      const char *dot = strrchr(name, '.');
       if (!dot || !dot[1])
       {
+        f.close();
         continue;
       }
       const char *ext = dot + 1;
@@ -670,13 +738,13 @@ bool EpubList::load_index(const char *books_path, const char *index_path)
       char e3 = tolower(ext[3]);
       bool is_epu = (e0 == 'e' && e1 == 'p' && e2 == 'u' && (ext[3] == '\0'));
       bool is_epub = (e0 == 'e' && e1 == 'p' && e2 == 'u' && e3 == 'b' && ext[4] == '\0');
-      if (!is_epu && !is_epub)
+      if (is_epu || is_epub)
       {
-        continue;
+        dir_count++;
       }
-      dir_count++;
+      f.close();
     }
-    closedir(dir);
+    dir.close();
   }
   if (dir_count != count)
   {
@@ -703,7 +771,7 @@ void EpubList::save_index(const char *index_path)
     return;
   }
   const uint32_t magic = 0x58494245; // 'EBIX'
-  const uint16_t version = 1;
+  const uint16_t version = 2;
   uint16_t count = static_cast<uint16_t>(state.num_epubs);
   if (fp.write((const uint8_t *)&magic, sizeof(magic)) != sizeof(magic) ||
       fp.write((const uint8_t *)&version, sizeof(version)) != sizeof(version) ||

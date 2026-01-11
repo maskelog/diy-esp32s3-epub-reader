@@ -20,6 +20,10 @@ typedef struct
   uint16_t current_section;
   uint16_t current_page;
   uint16_t pages_in_current_section;
+  uint16_t bookmark_section;
+  uint16_t bookmark_page;
+  uint8_t bookmark_set;
+  uint8_t bookmark_padding;
   char cover_path[MAX_PATH_SIZE];
 } EpubListItem;
 

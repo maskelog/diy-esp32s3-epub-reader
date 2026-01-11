@@ -201,8 +201,8 @@ void M5GfxRenderer::flush_display()
     {
         m_refresh_count++;
 
-        // Every 10 page turns, do a full quality refresh to clear ghosting
-        if (m_refresh_count >= 10)
+        // Periodic full refresh to clear ghosting (optional, less frequent)
+        if (EPD_FULL_REFRESH_INTERVAL > 0 && m_refresh_count >= EPD_FULL_REFRESH_INTERVAL)
         {
             M5.Display.setEpdMode(epd_mode_t::epd_quality);
             framebuffer->pushSprite(0, 0);

@@ -3,6 +3,11 @@
 #include <M5Unified.h>
 #include "Renderer.h"
 
+#ifndef EPD_FULL_REFRESH_INTERVAL
+// Reduce full refresh frequency to minimize flashes while limiting ghosting.
+#define EPD_FULL_REFRESH_INTERVAL 30
+#endif
+
 class M5GfxRenderer : public Renderer
 {
 private:
