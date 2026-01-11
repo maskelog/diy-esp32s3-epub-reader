@@ -38,6 +38,7 @@ private:
   std::vector<EpubTocEntry> m_toc;
   // the base path for items in the EPUB file
   std::string m_base_path;
+  bool load_internal();
   // find the path for the content.opf file
   bool find_content_opf_file(ZipFile &zip, std::string &content_opf_file);
   bool parse_content_opf(ZipFile &zip, std::string &content_opf_file);
@@ -48,11 +49,13 @@ public:
   ~Epub() {}
   std::string &get_base_path() { return m_base_path; }
   bool load();
+  bool load_with_task(size_t stack_size_bytes);
 
   const std::string &get_path() const { return m_path; }
   const std::string &get_title();
   const std::string &get_cover_image_item();
   uint8_t *get_item_contents(const std::string &item_href, size_t *size = nullptr);
+  size_t get_item_uncompressed_size(const std::string &item_href);
 
   std::string &get_spine_item(int spine_index);
   int get_spine_item_id(std::string spine_key);

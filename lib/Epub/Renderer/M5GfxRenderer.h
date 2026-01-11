@@ -13,6 +13,7 @@ class M5GfxRenderer : public Renderer
 private:
     LGFX_Sprite *framebuffer;
     int m_refresh_count = 0;  // Track partial refreshes for periodic full refresh
+    bool dither_images = false;
 
 public:
     M5GfxRenderer();
@@ -21,6 +22,7 @@ public:
     virtual void draw_pixel(int x, int y, uint8_t color);
     virtual int get_text_width(const char *text, bool bold = false, bool italic = false);
     virtual void draw_text(int x, int y, const char *text, bool bold = false, bool italic = false);
+    virtual uint8_t map_image_gray(uint8_t gray) { return gray; }
     virtual void draw_rect(int x, int y, int width, int height, uint8_t color = 0);
     virtual void draw_triangle(int x0, int y0, int x1, int y1, int x2, int y2, uint8_t color);
     virtual void draw_circle(int x, int y, int r, uint8_t color = 0);
@@ -44,7 +46,7 @@ public:
 
     virtual void reset();
 
-    // Override image methods to use M5GFX's fast drawJpg
+    // Use the shared image helpers to enforce 1-bit rendering.
     virtual void draw_image(const std::string &filename, const uint8_t *data, size_t data_size, int x, int y, int width, int height);
     virtual bool get_image_size(const std::string &filename, const uint8_t *data, size_t data_size, int *width, int *height);
 };

@@ -58,7 +58,7 @@ bool EpubToc::load()
     epub = new Epub(selected_epub.path);
     vTaskDelay(10);
     
-    if (!epub->load())
+    if (!epub->load_with_task(64 * 1024))
     {
       ESP_LOGE(TAG, "Failed to load epub for index: %s", selected_epub.path);
 #ifndef UNIT_TEST

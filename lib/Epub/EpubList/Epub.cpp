@@ -23,8 +23,41 @@
 #include <pugixml.hpp>
 #include "../ZipFile/ZipFile.h"
 #include "Epub.h"
+#ifndef UNIT_TEST
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/semphr.h>
+#endif
 
 static const char *TAG = "EPUB";
+
+bool Epub::load_internal()
+{
+  ESP_LOGE(TAG, ">>> Epub::load() START: %s", m_path.c_str());
+  ZipFile zip(m_path.c_str());
+  ESP_LOGE(TAG, ">>> ZipFile created");
+  std::string content_opf_file;
+  if (!find_content_opf_file(zip, content_opf_file))
+  {
+    ESP_LOGE(TAG, "Could not open ePub '%s'", m_path.c_str());
+    return false;
+  }
+  ESP_LOGE(TAG, ">>> content.opf found: %s", content_opf_file.c_str());
+  // get the base path for the content
+  m_base_path = content_opf_file.substr(0, content_opf_file.find_last_of('/') + 1);
+  if (!parse_content_opf(zip, content_opf_file))
+  {
+    return false;
+  }
+  ESP_LOGE(TAG, ">>> content.opf parsed");
+  // The NCX table of contents is optional for our purposes.
+  if (!parse_toc_ncx_file(zip))
+  {
+    ESP_LOGW(TAG, "Continuing without NCX table of contents for '%s'", m_path.c_str());
+  }
+  ESP_LOGE(TAG, ">>> Epub::load() END");
+  return true;
+}
 
 bool Epub::find_content_opf_file(ZipFile &zip, std::string &content_opf_file)
 {
@@ -254,34 +287,53 @@ Epub::Epub(const std::string &path) : m_path(path)
 // load in the meta data for the epub file
 bool Epub::load()
 {
-  ESP_LOGE(TAG, ">>> Epub::load() START: %s", m_path.c_str());
-  ZipFile zip(m_path.c_str());
-  ESP_LOGE(TAG, ">>> ZipFile created");
-  std::string content_opf_file;
-  if (!find_content_opf_file(zip, content_opf_file))
+  return load_internal();
+}
+
+bool Epub::load_with_task(size_t stack_size_bytes)
+{
+#ifdef UNIT_TEST
+  (void)stack_size_bytes;
+  return epub_load_internal(this);
+#else
+  struct LoadContext
   {
-    ESP_LOGE(TAG, "Could not open ePub '%s'", m_path.c_str());
+    Epub *epub;
+    bool result;
+    SemaphoreHandle_t done;
+  };
+  LoadContext *ctx = new LoadContext();
+  ctx->epub = this;
+  ctx->result = false;
+  ctx->done = xSemaphoreCreateBinary();
+  if (!ctx->done)
+  {
+    delete ctx;
     return false;
   }
-  ESP_LOGE(TAG, ">>> content.opf found: %s", content_opf_file.c_str());
-  // get the base path for the content
-  m_base_path = content_opf_file.substr(0, content_opf_file.find_last_of('/') + 1);
-  if (!parse_content_opf(zip, content_opf_file))
+
+  auto task_fn = [](void *param) {
+    LoadContext *ctx = static_cast<LoadContext *>(param);
+    ctx->result = ctx->epub->load_internal();
+    xSemaphoreGive(ctx->done);
+    vTaskDelete(nullptr);
+  };
+
+  const uint32_t stack_words = static_cast<uint32_t>(stack_size_bytes / sizeof(StackType_t));
+  BaseType_t ok = xTaskCreatePinnedToCore(task_fn, "epub_load", stack_words, ctx, 2, nullptr, 1);
+  if (ok != pdPASS)
   {
+    vSemaphoreDelete(ctx->done);
+    delete ctx;
     return false;
   }
-  ESP_LOGE(TAG, ">>> content.opf parsed");
-  // The NCX table of contents is optional for our purposes: many modern
-  // EPUB3 files use different navigation structures. If parsing the NCX
-  // fails (e.g. "No ncx file specified"), log the error inside
-  // parse_toc_ncx_file() but still allow the EPUB to be treated as
-  // successfully loaded so it can be listed and read.
-  if (!parse_toc_ncx_file(zip))
-  {
-    ESP_LOGW(TAG, "Continuing without NCX table of contents for '%s'", m_path.c_str());
-  }
-  ESP_LOGE(TAG, ">>> Epub::load() END");
-  return true;
+
+  xSemaphoreTake(ctx->done, portMAX_DELAY);
+  bool result = ctx->result;
+  vSemaphoreDelete(ctx->done);
+  delete ctx;
+  return result;
+#endif
 }
 
 const std::string &Epub::get_title()
@@ -350,6 +402,18 @@ uint8_t *Epub::get_item_contents(const std::string &item_href, size_t *size)
     return nullptr;
   }
   return content;
+}
+
+size_t Epub::get_item_uncompressed_size(const std::string &item_href)
+{
+  ZipFile zip(m_path.c_str());
+  std::string path = normalise_path(item_href);
+  size_t size = 0;
+  if (!zip.get_file_uncompressed_size(path.c_str(), &size))
+  {
+    return 0;
+  }
+  return size;
 }
 
 int Epub::get_spine_items_count()

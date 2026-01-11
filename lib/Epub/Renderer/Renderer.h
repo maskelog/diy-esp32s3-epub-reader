@@ -51,6 +51,8 @@ public:
     line_spacing_percent = percent;
   }
   int get_line_spacing_percent() const { return line_spacing_percent; }
+  // Map grayscale image pixels to display output. Override for 1-bit output.
+  virtual uint8_t map_image_gray(uint8_t gray) { return gray; }
   virtual void draw_image(const std::string &filename, const uint8_t *data, size_t data_size, int x, int y, int width, int height);
   virtual bool get_image_size(const std::string &filename, const uint8_t *data, size_t data_size, int *width, int *height);
   virtual void draw_pixel(int x, int y, uint8_t color) = 0;
@@ -94,6 +96,10 @@ public:
   void set_margin_bottom(int margin_bottom) { this->margin_bottom = margin_bottom; }
   void set_margin_left(int margin_left) { this->margin_left = margin_left; }
   void set_margin_right(int margin_right) { this->margin_right = margin_right; }
+  int get_margin_top() const { return margin_top; }
+  int get_margin_bottom() const { return margin_bottom; }
+  int get_margin_left() const { return margin_left; }
+  int get_margin_right() const { return margin_right; }
   // deep sleep helper - persist any state to disk that may be needed on wake
   virtual bool dehydrate() { return false; };
   // deep sleep helper - retrieve any state from disk after wake

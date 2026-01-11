@@ -5,6 +5,7 @@
 #include <esp_task_wdt.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/semphr.h>
 #else
 #define ESP_LOGI(args...)
 #define ESP_LOGE(args...)
@@ -17,6 +18,91 @@
 #include "../Renderer/Renderer.h"
 
 static const char *TAG = "EREADER";
+
+#ifndef UNIT_TEST
+struct FullLayoutContext
+{
+  Renderer *renderer;
+  Epub *epub;
+  int section;
+  bool justified;
+  RubbishHtmlParser *parser;
+  bool ok;
+  SemaphoreHandle_t done;
+};
+
+struct RenderTaskContext
+{
+  Renderer *renderer;
+  Epub *epub;
+  RubbishHtmlParser *parser;
+  int page;
+  bool ok;
+  SemaphoreHandle_t done;
+};
+
+static void full_layout_task(void *param)
+{
+  FullLayoutContext *ctx = static_cast<FullLayoutContext *>(param);
+  ctx->ok = false;
+  ctx->parser = nullptr;
+  if (!ctx || !ctx->epub)
+  {
+    if (ctx && ctx->done)
+    {
+      xSemaphoreGive(ctx->done);
+    }
+    vTaskDelete(nullptr);
+    return;
+  }
+
+  std::string item = ctx->epub->get_spine_item(ctx->section);
+  if (item.empty())
+  {
+    xSemaphoreGive(ctx->done);
+    vTaskDelete(nullptr);
+    return;
+  }
+  std::string base_path = item.substr(0, item.find_last_of('/') + 1);
+
+  char *html = reinterpret_cast<char *>(ctx->epub->get_item_contents(item));
+  if (!html)
+  {
+    xSemaphoreGive(ctx->done);
+    vTaskDelete(nullptr);
+    return;
+  }
+
+  ctx->parser = new RubbishHtmlParser(html, strlen(html), base_path, ctx->justified);
+  free(html);
+  if (ctx->parser)
+  {
+    ctx->parser->layout(ctx->renderer, ctx->epub);
+    ctx->ok = true;
+  }
+  xSemaphoreGive(ctx->done);
+  vTaskDelete(nullptr);
+}
+
+static void render_task(void *param)
+{
+  RenderTaskContext *ctx = static_cast<RenderTaskContext *>(param);
+  ctx->ok = false;
+  if (!ctx || !ctx->parser)
+  {
+    if (ctx && ctx->done)
+    {
+      xSemaphoreGive(ctx->done);
+    }
+    vTaskDelete(nullptr);
+    return;
+  }
+  ctx->parser->render_page(ctx->page, ctx->renderer, ctx->epub);
+  ctx->ok = true;
+  xSemaphoreGive(ctx->done);
+  vTaskDelete(nullptr);
+}
+#endif
 
 EpubReader::~EpubReader()
 {
@@ -69,7 +155,7 @@ bool EpubReader::load()
 
     ESP_LOGI(TAG, "Loading EPUB file");
     // Epub::load() returns true on success, false on failure
-    if (!epub->load())
+    if (!epub->load_with_task(64 * 1024))
     {
       ESP_LOGE(TAG, "Failed to load epub '%s'", state.path);
       delete epub;
@@ -138,15 +224,51 @@ void EpubReader::parse_and_layout_current_section()
   ESP_LOGE(TAG, ">>> Parse and layout section %d", state.current_section);
   ESP_LOGD(TAG, "Before read html: %d", esp_get_free_heap_size());
 
-  vTaskDelay(10);
+#ifndef UNIT_TEST
+  delete parser;
+  parser = nullptr;
+  parser_section = -1;
 
+  FullLayoutContext *ctx = new FullLayoutContext();
+  ctx->renderer = renderer;
+  ctx->epub = epub;
+  ctx->section = state.current_section;
+  ctx->justified = use_justified;
+  ctx->parser = nullptr;
+  ctx->ok = false;
+  ctx->done = xSemaphoreCreateBinary();
+  if (!ctx->done)
+  {
+    delete ctx;
+    return;
+  }
+
+  const uint32_t stack_words = static_cast<uint32_t>((96 * 1024) / sizeof(StackType_t));
+  if (xTaskCreatePinnedToCore(full_layout_task, "epub_layout", stack_words, ctx, 2, nullptr, 1) != pdPASS)
+  {
+    vSemaphoreDelete(ctx->done);
+    delete ctx;
+    return;
+  }
+
+  xSemaphoreTake(ctx->done, portMAX_DELAY);
+  vSemaphoreDelete(ctx->done);
+
+  if (ctx->ok && ctx->parser)
+  {
+    parser = ctx->parser;
+    parser_section = state.current_section;
+  }
+  else
+  {
+    delete ctx->parser;
+  }
+  delete ctx;
+#else
   std::string item = epub->get_spine_item(state.current_section);
   if (item.empty())
   {
     ESP_LOGE(TAG, "No spine item for section %d", state.current_section);
-#ifndef UNIT_TEST
-    if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
-#endif
     return;
   }
   std::string base_path = item.substr(0, item.find_last_of('/') + 1);
@@ -156,30 +278,17 @@ void EpubReader::parse_and_layout_current_section()
   if (!html)
   {
     ESP_LOGE(TAG, "Failed to read HTML for spine item '%s'", item.c_str());
-#ifndef UNIT_TEST
-    if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
-#endif
     return;
   }
-
-  vTaskDelay(10);
-
-  ESP_LOGD(TAG, "After read html: %d", esp_get_free_heap_size());
-
   ESP_LOGI(TAG, "Parsing HTML (%zu bytes)", strlen(html));
   delete parser;
   parser = new RubbishHtmlParser(html, strlen(html), base_path, use_justified);
   parser_section = state.current_section;
   free(html);
 
-  vTaskDelay(10);
-
-  ESP_LOGD(TAG, "After parse: %d", esp_get_free_heap_size());
-
   ESP_LOGI(TAG, "Laying out page");
   parser->layout(renderer, epub);
-
-  vTaskDelay(10);
+#endif
 
   ESP_LOGE(TAG, "<<< Layout complete, %d pages", parser->get_page_count());
   ESP_LOGD(TAG, "After layout: %d", esp_get_free_heap_size());
@@ -344,7 +453,36 @@ void EpubReader::render()
 
   vTaskDelay(10);
 
+#ifndef UNIT_TEST
+  RenderTaskContext *ctx = new RenderTaskContext();
+  ctx->renderer = renderer;
+  ctx->epub = epub;
+  ctx->parser = parser;
+  ctx->page = state.current_page;
+  ctx->ok = false;
+  ctx->done = xSemaphoreCreateBinary();
+  if (!ctx->done)
+  {
+    delete ctx;
+  }
+  else
+  {
+    const uint32_t stack_words = static_cast<uint32_t>((64 * 1024) / sizeof(StackType_t));
+    if (xTaskCreatePinnedToCore(render_task, "epub_render", stack_words, ctx, 2, nullptr, 1) != pdPASS)
+    {
+      vSemaphoreDelete(ctx->done);
+      delete ctx;
+    }
+    else
+    {
+      xSemaphoreTake(ctx->done, portMAX_DELAY);
+      vSemaphoreDelete(ctx->done);
+      delete ctx;
+    }
+  }
+#else
   parser->render_page(state.current_page, renderer, epub);
+#endif
 
   vTaskDelay(10);
 

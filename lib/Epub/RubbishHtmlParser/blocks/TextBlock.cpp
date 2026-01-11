@@ -82,12 +82,16 @@ void TextBlock::layout(Renderer *renderer, Epub *epub, int max_width)
 
   // now apply the dynamic programming algorithm to find the best line breaks
   int n = word_widths.size();
+  if (n <= 0)
+  {
+    return;
+  }
 
   // DP table in which dp[i] represents cost of line starting with word words[i]
-  int dp[n];
+  std::vector<int> dp(static_cast<size_t>(n));
 
   // Array in which ans[i] store index of last word in line starting with word word[i]
-  size_t ans[n];
+  std::vector<size_t> ans(static_cast<size_t>(n));
 
   // If only one word is present then only one line is required. Cost of last line is zero. Hence cost
   // of this line is zero. Ending point is also n-1 as single word is present

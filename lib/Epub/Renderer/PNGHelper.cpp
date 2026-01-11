@@ -30,10 +30,18 @@ void pngle_init_callback(pngle_t *pngle, uint32_t w, uint32_t h)
   helper->last_y = -1;
   helper->x_scale = 1.0f;
   helper->y_scale = 1.0f;
-  if (w > 0 && h > 0)
+  helper->downscale = false;
+  if (w > 0 && h > 0 && helper->target_width > 0 && helper->target_height > 0)
   {
-    helper->x_scale = std::min(1.0f, static_cast<float>(helper->renderer->get_page_width()) / static_cast<float>(w));
-    helper->y_scale = std::min(1.0f, static_cast<float>(helper->renderer->get_page_height()) / static_cast<float>(h));
+    helper->x_scale = static_cast<float>(helper->target_width) / static_cast<float>(w);
+    helper->y_scale = static_cast<float>(helper->target_height) / static_cast<float>(h);
+    helper->downscale = (helper->x_scale < 0.999f || helper->y_scale < 0.999f);
+    if (helper->downscale && helper->target_width > 0)
+    {
+      helper->row_sum.assign(static_cast<size_t>(helper->target_width), 0);
+      helper->row_count.assign(static_cast<size_t>(helper->target_width), 0);
+      helper->accum_y = -1;
+    }
   }
 }
 
@@ -62,6 +70,40 @@ void pngle_draw_callback(pngle_t *pngle, uint32_t x, uint32_t y, uint32_t w, uin
   int sx1 = helper->x_pos + static_cast<int>((x + w) * helper->x_scale);
   int sy1 = helper->y_pos + static_cast<int>((y + h) * helper->y_scale);
 
+  if (helper->downscale)
+  {
+    int dst_y = sy0;
+    if (helper->accum_y != dst_y)
+    {
+      if (helper->accum_y >= 0)
+      {
+        for (int i = 0; i < helper->target_width; ++i)
+        {
+          uint16_t count = helper->row_count[static_cast<size_t>(i)];
+          if (count == 0)
+          {
+            continue;
+          }
+          uint32_t sum = helper->row_sum[static_cast<size_t>(i)];
+          uint8_t gray = static_cast<uint8_t>((sum + (count / 2)) / count);
+          uint8_t mapped = helper->renderer->map_image_gray(gray);
+          helper->renderer->draw_pixel(helper->x_pos + i, helper->accum_y, mapped);
+          helper->row_sum[static_cast<size_t>(i)] = 0;
+          helper->row_count[static_cast<size_t>(i)] = 0;
+        }
+      }
+      helper->accum_y = dst_y;
+    }
+    const int dst_x = sx0;
+    const int idx = dst_x - helper->x_pos;
+    if (idx >= 0 && idx < helper->target_width)
+    {
+      helper->row_sum[static_cast<size_t>(idx)] += gray8;
+      helper->row_count[static_cast<size_t>(idx)] += 1;
+    }
+    return;
+  }
+
   if (sx1 <= sx0)
   {
     sx1 = sx0 + 1;
@@ -80,7 +122,7 @@ void pngle_draw_callback(pngle_t *pngle, uint32_t x, uint32_t y, uint32_t w, uin
     }
     for (int xx = sx0; xx < sx1; ++xx)
     {
-      helper->renderer->draw_pixel(xx, yy, gray8);
+      helper->renderer->draw_pixel(xx, yy, helper->renderer->map_image_gray(gray8));
     }
   }
 }
@@ -140,9 +182,15 @@ bool PNGHelper::render(const uint8_t *data, size_t data_size, Renderer *renderer
   this->renderer = renderer;
   this->y_pos = y_pos;
   this->x_pos = x_pos;
+  this->target_width = width;
+  this->target_height = height;
   this->last_y = -1;
   this->x_scale = 1.0f;
   this->y_scale = 1.0f;
+  this->downscale = false;
+  this->accum_y = -1;
+  this->row_sum.clear();
+  this->row_count.clear();
 
   pngle_t *png = pngle_new();
   if (!png)
@@ -163,6 +211,23 @@ bool PNGHelper::render(const uint8_t *data, size_t data_size, Renderer *renderer
     return false;
   }
 
+  if (downscale && accum_y >= 0)
+  {
+    for (int i = 0; i < target_width; ++i)
+    {
+      uint16_t count = row_count[static_cast<size_t>(i)];
+      if (count == 0)
+      {
+        continue;
+      }
+      uint32_t sum = row_sum[static_cast<size_t>(i)];
+      uint8_t gray = static_cast<uint8_t>((sum + (count / 2)) / count);
+      uint8_t mapped = renderer->map_image_gray(gray);
+      renderer->draw_pixel(x_pos + i, accum_y, mapped);
+      row_sum[static_cast<size_t>(i)] = 0;
+      row_count[static_cast<size_t>(i)] = 0;
+    }
+  }
   pngle_destroy(png);
   return true;
 }
@@ -212,8 +277,8 @@ bool PNGHelper::render(const uint8_t *data, size_t data_size, Renderer *renderer
       png.close();
       return false;
     }
-    this->x_scale = std::min(1.0f, float(width) / float(img_w));
-    this->y_scale = std::min(1.0f, float(height) / float(img_h));
+    this->x_scale = float(width) / float(img_w);
+    this->y_scale = float(height) / float(img_h);
     if (this->x_scale <= 0.0f || this->y_scale <= 0.0f)
     {
       ESP_LOGE(TAG, "invalid PNG scale (%f x %f)", this->x_scale, this->y_scale);
@@ -221,6 +286,10 @@ bool PNGHelper::render(const uint8_t *data, size_t data_size, Renderer *renderer
       return false;
     }
     this->last_y = -1;
+    this->downscale = (x_scale < 0.999f || y_scale < 0.999f);
+    this->accum_y = -1;
+    this->row_sum.clear();
+    this->row_count.clear();
     size_t row_bytes = static_cast<size_t>(img_w) * sizeof(uint16_t);
     if (row_bytes / sizeof(uint16_t) != static_cast<size_t>(img_w))
     {
@@ -237,6 +306,23 @@ bool PNGHelper::render(const uint8_t *data, size_t data_size, Renderer *renderer
     }
 
     png.decode(this, PNG_FAST_PALETTE);
+    if (downscale && accum_y >= 0)
+    {
+      for (int i = 0; i < target_width; ++i)
+      {
+        uint16_t count = row_count[static_cast<size_t>(i)];
+        if (count == 0)
+        {
+          continue;
+        }
+        uint32_t sum = row_sum[static_cast<size_t>(i)];
+        uint8_t gray = static_cast<uint8_t>((sum + (count / 2)) / count);
+        uint8_t mapped = renderer->map_image_gray(gray);
+        renderer->draw_pixel(x_pos + i, accum_y, mapped);
+        row_sum[static_cast<size_t>(i)] = 0;
+        row_count[static_cast<size_t>(i)] = 0;
+      }
+    }
     png.close();
     free(this->tmp_rgb565_buffer);
     return true;
@@ -268,26 +354,69 @@ void PNGHelper::draw_callback(PNGDRAW *draw)
     {
       return;
     }
-    int dst_width = static_cast<int>(src_width * x_scale);
-    if (dst_width <= 0)
+    if (downscale)
     {
-      return;
+      int dst_y = y_pos + static_cast<int>(draw->y * y_scale);
+      if (accum_y != dst_y)
+      {
+        if (accum_y >= 0)
+        {
+          for (int i = 0; i < target_width; ++i)
+          {
+            uint16_t count = row_count[static_cast<size_t>(i)];
+            if (count == 0)
+            {
+              continue;
+            }
+            uint32_t sum = row_sum[static_cast<size_t>(i)];
+            uint8_t gray = static_cast<uint8_t>((sum + (count / 2)) / count);
+            uint8_t mapped = renderer->map_image_gray(gray);
+            renderer->draw_pixel(x_pos + i, accum_y, mapped);
+            row_sum[static_cast<size_t>(i)] = 0;
+            row_count[static_cast<size_t>(i)] = 0;
+          }
+        }
+        accum_y = dst_y;
+      }
+
+      for (int src_x = 0; src_x < src_width; ++src_x)
+      {
+        int dst_x = x_pos + static_cast<int>(src_x * x_scale);
+        int idx = dst_x - x_pos;
+        if (idx < 0 || idx >= target_width)
+        {
+          continue;
+        }
+        uint8_t r, g, b;
+        convert_rgb_565_to_rgb(tmp_rgb565_buffer[src_x], &r, &g, &b);
+        uint32_t gray = (r * 38 + g * 75 + b * 15) >> 7;
+        row_sum[static_cast<size_t>(idx)] += static_cast<uint8_t>(gray);
+        row_count[static_cast<size_t>(idx)] += 1;
+      }
     }
-    for (int x = 0; x < dst_width; x++)
+    else
     {
-      uint8_t r, g, b;
-      int src_x = static_cast<int>(x / x_scale);
-      if (src_x < 0)
+      int dst_width = static_cast<int>(src_width * x_scale);
+      if (dst_width <= 0)
       {
-        src_x = 0;
+        return;
       }
-      else if (src_x >= src_width)
+      for (int x = 0; x < dst_width; x++)
       {
-        src_x = src_width - 1;
+        uint8_t r, g, b;
+        int src_x = static_cast<int>(x / x_scale);
+        if (src_x < 0)
+        {
+          src_x = 0;
+        }
+        else if (src_x >= src_width)
+        {
+          src_x = src_width - 1;
+        }
+        convert_rgb_565_to_rgb(tmp_rgb565_buffer[src_x], &r, &g, &b);
+        uint32_t gray = (r * 38 + g * 75 + b * 15) >> 7;
+        renderer->draw_pixel(x_pos + x, y, renderer->map_image_gray(static_cast<uint8_t>(gray)));
       }
-      convert_rgb_565_to_rgb(tmp_rgb565_buffer[src_x], &r, &g, &b);
-      uint32_t gray = (r * 38 + g * 75 + b * 15) >> 7;
-      renderer->draw_pixel(x_pos + x, y, gray);
     }
     last_y = y;
   }

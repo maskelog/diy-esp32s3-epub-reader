@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 #include "ImageHelper.h"
 
 class Renderer;
@@ -19,9 +20,15 @@ private:
   Renderer *renderer;
   int x_pos;
   int y_pos;
+  int target_width;
+  int target_height;
   int last_y;
   float x_scale;
   float y_scale;
+  bool downscale;
+  int accum_y;
+  std::vector<uint32_t> row_sum;
+  std::vector<uint16_t> row_count;
 #ifndef USE_PNGLE
   uint16_t *tmp_rgb565_buffer;
   PNG png;

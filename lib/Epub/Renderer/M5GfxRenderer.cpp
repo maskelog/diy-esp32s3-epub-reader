@@ -79,8 +79,23 @@ void M5GfxRenderer::draw_pixel(int x, int y, uint8_t color)
     if (framebuffer)
 
     {
-
-        framebuffer->drawPixel(x, y, color);
+        uint8_t gray = color;
+        if (dither_images)
+        {
+            static const uint8_t bayer8[64] = {
+                0, 32, 8, 40, 2, 34, 10, 42,
+                48, 16, 56, 24, 50, 18, 58, 26,
+                12, 44, 4, 36, 14, 46, 6, 38,
+                60, 28, 52, 20, 62, 30, 54, 22,
+                3, 35, 11, 43, 1, 33, 9, 41,
+                51, 19, 59, 27, 49, 17, 57, 25,
+                15, 47, 7, 39, 13, 45, 5, 37,
+                63, 31, 55, 23, 61, 29, 53, 21};
+            const uint8_t t = static_cast<uint8_t>(bayer8[((y & 7) << 3) | (x & 7)] * 4 + 2);
+            gray = (gray > t) ? 255 : 0;
+        }
+        uint16_t c = ((gray >> 3) << 11) | ((gray >> 2) << 5) | (gray >> 3);
+        framebuffer->drawPixel(x, y, c);
     }
 }
 
@@ -315,100 +330,13 @@ int M5GfxRenderer::get_space_width() { return 8; }
 
 void M5GfxRenderer::draw_image(const std::string &filename, const uint8_t *data, size_t data_size, int x, int y, int width, int height)
 {
-    if (!framebuffer || !data || data_size == 0)
-        return;
-
-    // Apply margins
-    int draw_x = x + margin_left;
-    int draw_y = y + margin_top;
-
-    // Skip very large images that might cause timeout
-    if (data_size > 300000)
-    {
-        ESP_LOGW("M5GfxRenderer", "Skipping large image (%zu bytes)", data_size);
-        // Draw placeholder
-        framebuffer->fillRect(draw_x, draw_y, width, height, 0xCCCC);
-        framebuffer->drawRect(draw_x, draw_y, width, height, 0x0000);
-        return;
-    }
-
-    // Check file extension to determine image type
-    bool is_jpg = false;
-    bool is_png = false;
-    size_t len = filename.length();
-    if (len >= 4)
-    {
-        std::string ext = filename.substr(len - 4);
-        for (auto &c : ext)
-            c = tolower(c);
-        is_jpg = (ext == ".jpg");
-        is_png = (ext == ".png");
-    }
-    if (len >= 5 && !is_jpg)
-    {
-        std::string ext = filename.substr(len - 5);
-        for (auto &c : ext)
-            c = tolower(c);
-        is_jpg = (ext == ".jpeg");
-    }
-
-    // Remove this task from watchdog during image decode (can take several seconds)
-    esp_err_t wdt_err = esp_task_wdt_delete(xTaskGetCurrentTaskHandle());
-    bool was_subscribed = (wdt_err == ESP_OK);
-
-    vTaskDelay(1);
-
-    ESP_LOGI("M5GfxRenderer", "Drawing image: %s (%zu bytes) at (%d,%d) size %dx%d",
-             filename.c_str(), data_size, draw_x, draw_y, width, height);
-
-    // Draw to framebuffer using LGFX_Sprite's drawJpg/drawPng
-    // Parameters: data, size, x, y, maxWidth, maxHeight, offX, offY, scale_x, scale_y
-    bool success = false;
-    if (is_jpg)
-    {
-        // Use drawJpg with maxWidth/maxHeight for scaling
-        success = framebuffer->drawJpg(data, data_size, draw_x, draw_y, width, height, 0, 0, 1.0f, 1.0f);
-    }
-    else if (is_png)
-    {
-        success = framebuffer->drawPng(data, data_size, draw_x, draw_y, width, height, 0, 0, 1.0f, 1.0f);
-    }
-    else
-    {
-        // Default to JPEG
-        success = framebuffer->drawJpg(data, data_size, draw_x, draw_y, width, height, 0, 0, 1.0f, 1.0f);
-    }
-
-    if (!success)
-    {
-        ESP_LOGW("M5GfxRenderer", "Failed to draw image, showing placeholder");
-        // Draw error placeholder
-        framebuffer->fillRect(draw_x, draw_y, width, height, 0xCCCC);
-        framebuffer->drawRect(draw_x, draw_y, width, height, 0x0000);
-    }
-    else
-    {
-        ESP_LOGI("M5GfxRenderer", "Image drawn successfully");
-    }
-
-    vTaskDelay(1);
-
-    // Re-add this task to watchdog
-    if (was_subscribed)
-    {
-        esp_task_wdt_add(xTaskGetCurrentTaskHandle());
-    }
+    const bool prev_dither = dither_images;
+    dither_images = true;
+    Renderer::draw_image(filename, data, data_size, x, y, width, height);
+    dither_images = prev_dither;
 }
 
 bool M5GfxRenderer::get_image_size(const std::string &filename, const uint8_t *data, size_t data_size, int *width, int *height)
 {
-    if (!data || data_size == 0 || !width || !height)
-        return false;
-
-    // For M5Paper, we skip the slow JPEG decode for size detection
-    // M5GFX's drawJpg will handle scaling automatically
-    // Just return a reasonable default size to indicate the image is valid
-    *width = 200; // Reasonable cover size
-    *height = 300;
-    return true;
+    return Renderer::get_image_size(filename, data, data_size, width, height);
 }
