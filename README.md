@@ -6,7 +6,7 @@ This repository is a fork of:
 
 https://github.com/atomic14/diy-esp32-epub-reader
 
-The focus of this fork is a working port for the **M5Stack Paper S3**.
+The focus of this fork is a working port for the **M5Stack M5Paper**.
 
 ![3 supported environments](docs/diy-main-image.jpg)
 Above the 3 supported environments. You can watch a video of the build [here](https://youtu.be/VLiCgB0odOQ)
@@ -21,27 +21,26 @@ And here it is running on the M5Paper:
 
 What is it? It's a DIY ePub reader for the ESP32.
 
-## Paper S3 focused build
+## M5Paper focused build
 
-This repository and the `paper_s3_idf` environment are now focused on the
-M5Stack Paper S3 board:
+This repository and the `m5paper` environment are now focused on the
+M5Stack M5Paper board:
 
-- Display: 4.7" 960x540 e-paper panel driven by epdiy, rendered in inverted
-  portrait mode (logical page size 540x960).
-- Touch: GT911 controller reporting a 540x960 coordinate space which is mapped
-  directly onto the logical page.
-- Storage: SD card mounted at `/fs`, with EPUB files loaded from `/fs/Books`.
-- Temperature: epdiy is driven with a fixed default temperature of 20°C
-  (configurable in code if needed).
+- Display: 4.7" 960x540 e-paper panel driven by M5GFX/M5Unified.
+- Touch: M5Paper touch handling via M5Unified and the M5Paper touch controls.
+- Storage: SD card with EPUB files loaded from `/Books`.
+- Sleep image: custom sleep image loaded from `/Sleep/bg.png`.
+- Bookmarks: manual bookmark set from the reader menu and restored on reopen.
+- Refresh: reduced full refresh frequency to minimize flash while reading.
 
-Additional Paper S3 specifics in this fork:
+Additional M5Paper specifics in this fork:
 
-- **Firmware build targets**: `paper_s3_idf` (debug) and `paper_s3_release` (release).
-- **Touch**: GT911 touch controller mapping to the same logical 540x960 page space.
-- **Fonts**: optional TTF font support via `/fonts/reader.ttf` on the SD card.
+- **Firmware build target**: `m5paper`.
+- **Sleep image**: use a 540x960 PNG at `/Sleep/bg.png` (no transparency).
+- **Library index**: cached in `/Books/BOOKS.IDX` to speed up library load.
 
 Other environments and boards from the original project are no longer
-maintained in this configuration; the goal is a dedicated, optimized Paper S3
+maintained in this configuration; the goal is a dedicated, optimized M5Paper
 e-reader firmware.
 
 It will parse ePub files that can be downloaded from places such as [Project Gutenberg](https://www.gutenberg.org/).
@@ -84,17 +83,12 @@ If you already cloned without submodules:
 git submodule update --init --recursive
 ```
 
-# Paper S3 prerequisites / notes
+# M5Paper prerequisites / notes
 
-- The Paper S3 build uses the ESP-IDF framework via PlatformIO.
-- FreeType support is enabled for the Paper S3 environments and this fork includes a prebuilt `lib_freetype` static library.
-- To use a custom font, place a TTF at:
-
-```
-/fonts/reader.ttf
-```
-
-on the SD card.
+- The M5Paper build uses the Arduino framework via PlatformIO.
+- The M5Paper firmware uses M5GFX/M5Unified for display and input.
+- EPUBs should live in `/Books` on the SD card.
+- Optional sleep image: `/Sleep/bg.png` (540x960 PNG, no transparency).
 
 For device setup, SD card layout, and usage instructions, see:
 
