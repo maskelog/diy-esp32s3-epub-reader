@@ -8,6 +8,10 @@
 #include "EpubList/EpubReader.h"
 #include "EpubList/EpubToc.h"
 #include <RubbishHtmlParser/RubbishHtmlParser.h>
+#include "ZipFile/ZipFile.h"
+#ifdef BOARD_TYPE_M5_PAPER
+#include "Renderer/M5GfxRenderer.h"
+#endif
 #include "boards/Board.h"
 #include "boards/controls/M5PaperButtonControls.h"
 #include "boards/controls/M5PaperTouchControls.h"
@@ -119,6 +123,7 @@ void draw_battery_level(Renderer *renderer, float voltage, float percentage);
 static void show_library_loading(Renderer *renderer);
 static void show_sleep_image(Renderer *renderer);
 static int find_last_open_book_index();
+static std::string normalise_path_for_zip(const std::string &path);
 static void load_app_settings(Renderer *renderer);
 static void save_app_settings(Renderer *renderer);
 static void apply_idle_profile();
@@ -1271,6 +1276,54 @@ static void show_library_loading(Renderer *renderer)
   renderer->flush_display();
 }
 
+static std::string normalise_path_for_zip(const std::string &path)
+{
+  std::vector<std::string> components;
+  std::string component;
+  for (char c : path)
+  {
+    if (c == '/')
+    {
+      if (!component.empty())
+      {
+        if (component == "..")
+        {
+          if (!components.empty())
+          {
+            components.pop_back();
+          }
+        }
+        else if (component != ".")
+        {
+          components.push_back(component);
+        }
+        component.clear();
+      }
+    }
+    else
+    {
+      component += c;
+    }
+  }
+  if (!component.empty())
+  {
+    if (component != "." && component != "..")
+    {
+      components.push_back(component);
+    }
+  }
+  std::string result;
+  for (size_t i = 0; i < components.size(); ++i)
+  {
+    if (i > 0)
+    {
+      result += "/";
+    }
+    result += components[i];
+  }
+  return result;
+}
+
 static void show_sleep_cover(Renderer *renderer)
 {
   // Remove from watchdog during sleep cover display (EPUB/image loading can be slow)
@@ -1304,77 +1357,177 @@ static void show_sleep_cover(Renderer *renderer)
       esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     return;
   }
+#ifndef UNIT_TEST
+  ESP_LOGE(TAG, "Sleep cover path: %s", item.cover_path);
+#endif
 
-  Epub epub(item.path);
-  if (!epub.load())
+#ifndef UNIT_TEST
+  struct SleepCoverContext
+  {
+    std::string epub_path;
+    std::string cover_path;
+    uint8_t *data;
+    size_t size;
+    bool ok;
+    SemaphoreHandle_t done;
+  };
+  SleepCoverContext ctx = {};
+  ctx.epub_path = item.path;
+  ctx.cover_path = normalise_path_for_zip(item.cover_path);
+  ctx.data = nullptr;
+  ctx.size = 0;
+  ctx.ok = false;
+  ctx.done = xSemaphoreCreateBinary();
+  if (!ctx.done)
   {
     if (was_subscribed)
       esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     return;
   }
 
-  size_t image_data_size = 0;
-  uint8_t *image_data = epub.get_item_contents(item.cover_path, &image_data_size);
-  if (!image_data || image_data_size == 0)
+  auto task_fn = [](void *param) {
+    SleepCoverContext *ctx = static_cast<SleepCoverContext *>(param);
+    ESP_LOGE(TAG, "Sleep cover task: opening EPUB: %s", ctx->epub_path.c_str());
+    ZipFile zip(ctx->epub_path.c_str());
+    ESP_LOGE(TAG, "Sleep cover task: looking for: %s", ctx->cover_path.c_str());
+    size_t cover_size = 0;
+    bool size_ok = zip.get_file_uncompressed_size(ctx->cover_path.c_str(), &cover_size);
+    ESP_LOGE(TAG, "Sleep cover task: get_file_uncompressed_size=%d, size=%zu", size_ok ? 1 : 0, cover_size);
+    if (size_ok && cover_size > 0 && cover_size <= (600 * 1024))
+    {
+      ESP_LOGE(TAG, "Sleep cover task: reading file to memory");
+      size_t image_data_size = 0;
+      uint8_t *image_data = zip.read_file_to_memory(ctx->cover_path.c_str(), &image_data_size);
+      ESP_LOGE(TAG, "Sleep cover task: read_file_to_memory returned, data=%p, size=%zu", image_data, image_data_size);
+      if (image_data && image_data_size > 0)
+      {
+        ctx->data = image_data;
+        ctx->size = image_data_size;
+        ctx->ok = true;
+        ESP_LOGE(TAG, "Sleep cover task: SUCCESS");
+      }
+      else
+      {
+        ESP_LOGE(TAG, "Sleep cover task: FAILED to read image data");
+      }
+    }
+    else
+    {
+      ESP_LOGE(TAG, "Sleep cover task: FAILED size check (size_ok=%d, size=%zu, limit=600KB)",
+               size_ok ? 1 : 0, cover_size);
+    }
+    xSemaphoreGive(ctx->done);
+    vTaskDelete(nullptr);
+  };
+
+  // Reduce stack size from 96KB to 48KB to avoid allocation failure
+  const uint32_t stack_words = static_cast<uint32_t>((48 * 1024) / sizeof(StackType_t));
+  ESP_LOGE(TAG, "Sleep cover: creating task with stack=%u words (%u bytes)", stack_words, stack_words * sizeof(StackType_t));
+  BaseType_t ok = xTaskCreatePinnedToCore(task_fn, "sleep_cover", stack_words, &ctx, 2, nullptr, 1);
+  if (ok != pdPASS)
   {
-    free(image_data);
+    ESP_LOGE(TAG, "Sleep cover: FAILED to create task (error=%d)", ok);
+    vSemaphoreDelete(ctx.done);
     if (was_subscribed)
       esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     return;
   }
+
+  ESP_LOGE(TAG, "Sleep cover: task created, waiting for completion");
+  xSemaphoreTake(ctx.done, portMAX_DELAY);
+  ESP_LOGE(TAG, "Sleep cover: task completed");
+  vSemaphoreDelete(ctx.done);
+  if (ctx.ok && ctx.data && ctx.size > 0)
+  {
+    ESP_LOGE(TAG, "Sleep cover bytes: %zu", ctx.size);
 
 #ifdef BOARD_TYPE_M5_PAPER
-  // Use M5GFX's drawJpg directly for fast rendering on M5Paper
-  ESP_LOGI("main", "Displaying sleep cover from: %s (%zu bytes)", item.cover_path, image_data_size);
+    // Use M5.Display directly like CUSTOM mode for better rendering
+    // Do a full quality clear to reduce ghosting before the sleep image
+    M5.Display.setEpdMode(epd_mode_t::epd_quality);
+    M5.Display.fillScreen(TFT_WHITE);
+    M5.Display.display();
+    M5.Display.waitDisplay();
 
-  vTaskDelay(1);
-  M5.Display.fillScreen(0xFF); // White
+    // Pre-darken to push the panel toward solid black for better contrast
+    M5.Display.fillScreen(TFT_BLACK);
+    M5.Display.display();
+    M5.Display.waitDisplay();
 
-  bool success = M5.Display.drawJpg(image_data, image_data_size, 0, 0,
-                                    M5.Display.width(), M5.Display.height());
+    // Detect image format from first few bytes
+    bool is_jpeg = (ctx.size > 2 && ctx.data[0] == 0xFF && ctx.data[1] == 0xD8);
+    bool is_png = (ctx.size > 8 && ctx.data[0] == 0x89 && ctx.data[1] == 0x50 &&
+                   ctx.data[2] == 0x4E && ctx.data[3] == 0x47);
 
-  free(image_data);
+    bool success = false;
+    if (is_jpeg)
+    {
+      ESP_LOGE(TAG, "Sleep cover: rendering JPEG");
+      success = M5.Display.drawJpg(ctx.data, ctx.size, 0, 0,
+                                   M5.Display.width(), M5.Display.height(),
+                                   0, 0, 0, 0, datum_t::middle_center);
+    }
+    else if (is_png)
+    {
+      ESP_LOGE(TAG, "Sleep cover: rendering PNG");
+      success = M5.Display.drawPng(ctx.data, ctx.size, 0, 0,
+                                   M5.Display.width(), M5.Display.height(),
+                                   0, 0, 0, 0, datum_t::middle_center);
+    }
+    else
+    {
+      ESP_LOGW(TAG, "Sleep cover: unknown image format (first bytes: 0x%02X 0x%02X)",
+               ctx.data[0], ctx.data[1]);
+    }
 
-  if (!success)
-  {
-    ESP_LOGW("main", "Failed to decode sleep cover image");
-    if (was_subscribed)
-      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
-    return;
-  }
-
-  ESP_LOGI("main", "Sleep cover displayed successfully");
-  if (was_subscribed)
-    esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+    if (success)
+    {
+      M5.Display.display();
+      M5.Display.waitDisplay();
+      ESP_LOGE(TAG, "Sleep cover rendered");
+    }
+    else
+    {
+      ESP_LOGW(TAG, "Sleep cover render failed");
+    }
 #else
-  // Fallback to renderer-based drawing for other boards
-  int img_w = 0;
-  int img_h = 0;
-  bool can_render = renderer->get_image_size(item.cover_path, image_data, image_data_size, &img_w, &img_h);
-  if (!can_render || img_w <= 0 || img_h <= 0)
-  {
-    free(image_data);
-    if (was_subscribed)
-      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
-    return;
+    // Fallback to renderer for other boards
+    int img_w = 0;
+    int img_h = 0;
+    bool can_render = renderer->get_image_size(ctx.cover_path, ctx.data, ctx.size, &img_w, &img_h);
+    ESP_LOGE(TAG, "Sleep cover size: ok=%d w=%d h=%d", can_render ? 1 : 0, img_w, img_h);
+    if (can_render && img_w > 0 && img_h > 0)
+    {
+      renderer->set_margin_top(0);
+      renderer->set_margin_bottom(0);
+      renderer->set_margin_left(0);
+      renderer->set_margin_right(0);
+      int width = renderer->get_page_width();
+      int height = renderer->get_page_height();
+      renderer->clear_screen();
+      renderer->set_image_placeholder_enabled(false);
+      renderer->draw_image(ctx.cover_path, ctx.data, ctx.size, 0, 0, width, height);
+      renderer->set_image_placeholder_enabled(true);
+      renderer->flush_display();
+      ESP_LOGE(TAG, "Sleep cover rendered");
+    }
+    else
+    {
+      ESP_LOGE(TAG, "Sleep cover render skipped");
+    }
+#endif
   }
-
-  renderer->set_margin_top(0);
-  renderer->set_margin_bottom(0);
-  renderer->set_margin_left(0);
-  renderer->set_margin_right(0);
-
-  int width = renderer->get_page_width();
-  int height = renderer->get_page_height();
-
-  renderer->clear_screen();
-  renderer->set_image_placeholder_enabled(false);
-  renderer->draw_image(item.cover_path, image_data, image_data_size, 0, 0, width, height);
-  renderer->set_image_placeholder_enabled(true);
-  free(image_data);
-  renderer->flush_display();
+  if (ctx.data)
+  {
+    free(ctx.data);
+  }
   if (was_subscribed)
     esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+  return;
+#else
+  if (was_subscribed)
+    esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+  return;
 #endif
 }
 
