@@ -5,6 +5,7 @@
 #include <string.h>
 #include <SPI.h>
 #include <SD.h>
+#include "../ZipFile/ZipFile.h"
 
 #ifndef UNIT_TEST
   #include <freertos/FreeRTOS.h>
@@ -22,6 +23,144 @@ static const char *TAG = "PUBLIST";
 
 #define PADDING 20
 #define EPUBS_PER_PAGE 5
+static const size_t kMaxCoverBytes = 600 * 1024;
+
+static bool render_cover_image(Renderer *renderer, const EpubListItem &item, int x, int y, int width, int height)
+{
+  if (!renderer || width <= 0 || height <= 0)
+  {
+    return false;
+  }
+  if (item.cover_path[0] == '\0')
+  {
+    return false;
+  }
+#ifndef UNIT_TEST
+  struct CoverRenderContext
+  {
+    Renderer *renderer;
+    std::string epub_path;
+    std::string cover_path;
+    int x;
+    int y;
+    int w;
+    int h;
+    bool ok;
+    SemaphoreHandle_t done;
+  };
+  CoverRenderContext ctx = {};
+  ctx.renderer = renderer;
+  ctx.epub_path = item.path;
+  ctx.cover_path = item.cover_path;
+  ctx.x = x;
+  ctx.y = y;
+  ctx.w = width;
+  ctx.h = height;
+  ctx.ok = false;
+  ctx.done = xSemaphoreCreateBinary();
+  if (!ctx.done)
+  {
+    return false;
+  }
+  auto task_fn = [](void *param) {
+    CoverRenderContext *ctx = static_cast<CoverRenderContext *>(param);
+    ZipFile zip(ctx->epub_path.c_str());
+    size_t cover_size = 0;
+    if (zip.get_file_uncompressed_size(ctx->cover_path.c_str(), &cover_size) &&
+        cover_size > 0 && cover_size <= kMaxCoverBytes)
+    {
+      size_t data_size = 0;
+      uint8_t *data = zip.read_file_to_memory(ctx->cover_path.c_str(), &data_size);
+      if (data && data_size > 0)
+      {
+        int img_w = 0;
+        int img_h = 0;
+        bool can_render = ctx->renderer->get_image_size(ctx->cover_path, data, data_size, &img_w, &img_h);
+        if (can_render && img_w > 0 && img_h > 0 && ctx->w > 0 && ctx->h > 0)
+        {
+          float scale_w = static_cast<float>(ctx->w) / static_cast<float>(img_w);
+          float scale_h = static_cast<float>(ctx->h) / static_cast<float>(img_h);
+          float scale = std::min(scale_w, scale_h);
+          int draw_w = std::max(1, static_cast<int>(img_w * scale));
+          int draw_h = std::max(1, static_cast<int>(img_h * scale));
+          int draw_x = ctx->x + (ctx->w - draw_w) / 2;
+          int draw_y = ctx->y + (ctx->h - draw_h) / 2;
+          draw_x += ctx->renderer->get_margin_left();
+          draw_y += ctx->renderer->get_margin_top();
+          ctx->renderer->set_image_placeholder_enabled(false);
+          ctx->renderer->draw_image(ctx->cover_path, data, data_size, draw_x, draw_y, draw_w, draw_h);
+          ctx->renderer->set_image_placeholder_enabled(true);
+          ctx->ok = true;
+        }
+        free(data);
+      }
+    }
+    xSemaphoreGive(ctx->done);
+    vTaskDelete(nullptr);
+  };
+  const uint32_t stack_words = static_cast<uint32_t>((64 * 1024) / sizeof(StackType_t));
+  BaseType_t ok = xTaskCreatePinnedToCore(task_fn, "cover_draw", stack_words, &ctx, 2, nullptr, 1);
+  if (ok != pdPASS)
+  {
+    vSemaphoreDelete(ctx.done);
+    return false;
+  }
+  xSemaphoreTake(ctx.done, portMAX_DELAY);
+  vSemaphoreDelete(ctx.done);
+  return ctx.ok;
+#else
+  (void)x;
+  (void)y;
+  (void)width;
+  (void)height;
+  return false;
+#endif
+}
+
+static void draw_cover_dots(Renderer *renderer, const char *title, int x, int y, int width, int height)
+{
+  if (!renderer || width <= 0 || height <= 0)
+  {
+    return;
+  }
+  renderer->fill_rect(x, y, width, height, 255);
+  renderer->draw_rect(x, y, width, height, 0);
+
+  unsigned int hash = 2166136261u;
+  if (title)
+  {
+    for (const unsigned char *p = reinterpret_cast<const unsigned char *>(title); *p; ++p)
+    {
+      hash ^= *p;
+      hash *= 16777619u;
+    }
+  }
+
+  int grid = 4;
+  int cell_w = width / grid;
+  int cell_h = height / grid;
+  int size = std::min(cell_w, cell_h) / 2;
+  if (size < 2)
+  {
+    size = 2;
+  }
+
+  for (int gy = 0; gy < grid; ++gy)
+  {
+    for (int gx = 0; gx < grid; ++gx)
+    {
+      int bit = (gy * grid + gx) & 31;
+      bool on = ((hash >> bit) & 0x1) != 0;
+      if (!on)
+      {
+        continue;
+      }
+      int cx = x + gx * cell_w + (cell_w - size) / 2;
+      int cy = y + gy * cell_h + (cell_h - size) / 2;
+      renderer->fill_rect(cx, cy, size, size, 0);
+    }
+  }
+}
 
 void EpubList::next()
 {
@@ -64,6 +203,41 @@ bool EpubList::load(const char *path)
     {
       m_title_blocks.resize(state.num_epubs, nullptr);
     }
+#ifndef UNIT_TEST
+    esp_err_t wdt_err = esp_task_wdt_delete(xTaskGetCurrentTaskHandle());
+    bool was_subscribed = (wdt_err == ESP_OK);
+#endif
+    bool updated = false;
+    for (int i = 0; i < state.num_epubs; ++i)
+    {
+      if (state.epub_list[i].cover_path[0] != '\0')
+      {
+        continue;
+      }
+      vTaskDelay(5);
+      Epub epub(state.epub_list[i].path);
+      if (!epub.load_with_task(64 * 1024))
+      {
+        continue;
+      }
+      const std::string &cover_item = epub.get_cover_image_item();
+      if (!cover_item.empty())
+      {
+        strncpy(state.epub_list[i].cover_path, cover_item.c_str(), MAX_PATH_SIZE);
+        state.epub_list[i].cover_path[MAX_PATH_SIZE - 1] = '\0';
+        updated = true;
+      }
+    }
+    if (updated)
+    {
+      save_index(index_path);
+    }
+#ifndef UNIT_TEST
+    if (was_subscribed)
+    {
+      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+    }
+#endif
     return true;
   }
   else
@@ -130,15 +304,22 @@ bool EpubList::load(const char *path)
 
       ESP_LOGE(TAG, ">>> Creating Epub object");
       Epub *epub = new Epub(base_path + file.name());
-      ESP_LOGE(TAG, ">>> Calling epub->load()");
-      if (epub->load())
+      ESP_LOGE(TAG, ">>> Calling epub->load_with_task()");
+      if (epub->load_with_task(64 * 1024))
       {
         ESP_LOGE(TAG, "  EPUB loaded successfully: %s", file.name());
         strncpy(state.epub_list[state.num_epubs].path, epub->get_path().c_str(), MAX_PATH_SIZE);
         strncpy(state.epub_list[state.num_epubs].title, replace_html_entities(epub->get_title()).c_str(), MAX_TITLE_SIZE);
-        // DISABLED: Cover image processing causes watchdog timeouts
-        // Always set cover_path to empty - no cover images
-        state.epub_list[state.num_epubs].cover_path[0] = '\0';
+        const std::string &cover_item = epub->get_cover_image_item();
+        if (!cover_item.empty())
+        {
+          strncpy(state.epub_list[state.num_epubs].cover_path, cover_item.c_str(), MAX_PATH_SIZE);
+          state.epub_list[state.num_epubs].cover_path[MAX_PATH_SIZE - 1] = '\0';
+        }
+        else
+        {
+          state.epub_list[state.num_epubs].cover_path[0] = '\0';
+        }
         state.num_epubs++;
         if (state.num_epubs == MAX_EPUB_LIST_SIZE)
         {
@@ -286,11 +467,6 @@ void EpubList::render()
         // Yield before loading each EPUB's cover to prevent watchdog timeout
         vTaskDelay(50);
 
-        // TEMPORARILY DISABLED: Cover image loading causes watchdog timeouts
-        // Always show title card instead of cover image for stability
-        
-        vTaskDelay(10);
-
         int available_height = cell_height - PADDING * 2;
         if (available_height < 1)
         {
@@ -305,28 +481,10 @@ void EpubList::render()
         int image_xpos = cell_x + (cell_width - image_width) / 2;
         int image_ypos = cell_y + (cell_height - image_height) / 2;
 
-        // Always show title card (cover images disabled for stability)
+        bool drew_cover = render_cover_image(renderer, state.epub_list[i], image_xpos, image_ypos, image_width, image_height);
+        if (!drew_cover)
         {
-          // Draw a simple bordered container with the book title only.
-          int card_x = image_xpos;
-          int card_y = image_ypos;
-          int card_w = image_width;
-          int card_h = image_height;
-          if (card_w > 0 && card_h > 0)
-          {
-            renderer->fill_rect(card_x, card_y, card_w, card_h, 255);
-            renderer->draw_rect(card_x, card_y, card_w, card_h, 0);
-            int inner_padding = 4;
-            int inner_x = card_x + inner_padding;
-            int inner_y = card_y + inner_padding;
-            int inner_w = card_w - inner_padding * 2;
-            int inner_h = card_h - inner_padding * 2;
-            if (inner_w > 0 && inner_h > 0)
-            {
-              // Use bold for the title in the grid title card.
-              renderer->draw_text_box(state.epub_list[i].title, inner_x, inner_y, inner_w, inner_h, true, false);
-            }
-          }
+          draw_cover_dots(renderer, state.epub_list[i].title, image_xpos, image_ypos, image_width, image_height);
         }
 
         // Yield after rendering each item
@@ -385,39 +543,16 @@ void EpubList::render()
         // Yield before loading each EPUB's cover to prevent watchdog timeout
         vTaskDelay(50);
 
-        // TEMPORARILY DISABLED: Cover image loading causes watchdog timeouts
-        // Always show title card instead of cover image for stability
-        
-        vTaskDelay(10);
-
         // draw the cover page area (now just title card)
         int image_xpos = PADDING;
         int image_ypos = ypos + PADDING;
         int image_height = cell_height - PADDING * 2;
         int image_width = 2 * image_height / 3;
 
-        // Always show title card (cover images disabled for stability)
+        bool drew_cover = render_cover_image(renderer, state.epub_list[i], image_xpos, image_ypos, image_width, image_height);
+        if (!drew_cover)
         {
-          // Draw a bordered title container in place of the cover.
-          int card_x = image_xpos;
-          int card_y = image_ypos;
-          int card_w = image_width;
-          int card_h = image_height;
-          if (card_w > 0 && card_h > 0)
-          {
-            renderer->fill_rect(card_x, card_y, card_w, card_h, 255);
-            renderer->draw_rect(card_x, card_y, card_w, card_h, 0);
-            int inner_padding = 4;
-            int inner_x = card_x + inner_padding;
-            int inner_y = card_y + inner_padding;
-            int inner_w = card_w - inner_padding * 2;
-            int inner_h = card_h - inner_padding * 2;
-            if (inner_w > 0 && inner_h > 0)
-            {
-              // Use bold for the title in the list-view title card.
-              renderer->draw_text_box(state.epub_list[i].title, inner_x, inner_y, inner_w, inner_h, true, false);
-            }
-          }
+          draw_cover_dots(renderer, state.epub_list[i].title, image_xpos, image_ypos, image_width, image_height);
         }
         // draw the title
         int text_xpos = image_xpos + image_width + PADDING;
