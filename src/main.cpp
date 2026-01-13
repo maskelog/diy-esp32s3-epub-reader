@@ -18,6 +18,8 @@
 
 #ifdef BOARD_TYPE_M5_PAPER
 #include <M5Unified.h>
+#include <WiFi.h>
+#include "M5StackWiFiUploader.h"
 #endif
 
 #ifdef USE_FREETYPE
@@ -52,7 +54,11 @@ bool invert_tap_zones = false;
 bool justify_paragraphs = false;
 
 const int READER_MENU_BASIC_ITEMS = 7;
+#ifdef BOARD_TYPE_M5_PAPER
+const int READER_MENU_ADVANCED_ITEMS = 13;
+#else
 const int READER_MENU_ADVANCED_ITEMS = 12;
+#endif
 
 typedef enum
 {
@@ -132,6 +138,10 @@ static void apply_gesture_profile();
 static void apply_line_spacing_profile(Renderer *renderer);
 static void renderReaderMenu(Renderer *renderer);
 static void show_status_bar_toast(Renderer *renderer, const char *text);
+#ifdef BOARD_TYPE_M5_PAPER
+static bool start_wifi_uploader(Renderer *renderer);
+static void stop_wifi_uploader(Renderer *renderer, bool show_toast);
+#endif
 
 static EpubList *epub_list = nullptr;
 static EpubReader *reader = nullptr;
@@ -139,6 +149,9 @@ static EpubToc *contents = nullptr;
 int reader_menu_selected = 0;
 bool reader_menu_advanced = false;
 static bool g_request_sleep_now = false;
+#ifdef BOARD_TYPE_M5_PAPER
+static M5StackWiFiUploader wifi_uploader;
+#endif
 
 Board *board = nullptr;
 Renderer *renderer = nullptr;
@@ -254,6 +267,13 @@ void loop()
     ESP_LOGE(TAG, ">>> Sleep requested, going to deep sleep");
     g_request_sleep_now = false;
 
+#ifdef BOARD_TYPE_M5_PAPER
+    if (wifi_uploader.isRunning())
+    {
+      stop_wifi_uploader(renderer, false);
+    }
+#endif
+
     // Show sleep image if enabled
     show_sleep_image(renderer);
 
@@ -276,6 +296,12 @@ void loop()
 
   button_controls->run();
   touch_controls->run();
+#ifdef BOARD_TYPE_M5_PAPER
+  if (wifi_uploader.isRunning())
+  {
+    wifi_uploader.handleClient();
+  }
+#endif
 
   UIAction ui_action = NONE;
   if (xQueueReceive(ui_queue, &ui_action, pdMS_TO_TICKS(10)) == pdTRUE)
@@ -515,7 +541,7 @@ void handleEpubTableContents(Renderer *renderer, UIAction action, bool needs_red
 
 static void renderReaderMenu(Renderer *renderer)
 {
-  const int max_items = 13;
+  const int max_items = 14;
   const char *labels[max_items];
   int items_total = 0;
 
@@ -530,6 +556,9 @@ static void renderReaderMenu(Renderer *renderer)
   char buf_margin[32];
   char buf_gest[32];
   char buf_spacing[32];
+#ifdef BOARD_TYPE_M5_PAPER
+  char buf_wifi[32];
+#endif
 
   if (!reader_menu_advanced)
   {
@@ -641,7 +670,13 @@ static void renderReaderMenu(Renderer *renderer)
     }
     snprintf(buf_spacing, sizeof(buf_spacing), "Line spacing: %d%%", spacing_percent);
     labels[10] = buf_spacing;
+#ifdef BOARD_TYPE_M5_PAPER
+    snprintf(buf_wifi, sizeof(buf_wifi), "WiFi upload: %s", wifi_uploader.isRunning() ? "ON" : "OFF");
+    labels[11] = buf_wifi;
+    labels[12] = "Save & Back";
+#else
     labels[11] = "Save & Back";
+#endif
   }
 
 #ifdef USE_FREETYPE
@@ -1122,6 +1157,63 @@ static void apply_line_spacing_profile(Renderer *renderer)
   }
   renderer->set_line_spacing_percent(spacing_percent);
 }
+
+#ifdef BOARD_TYPE_M5_PAPER
+static bool start_wifi_uploader(Renderer *renderer)
+{
+  if (WIFI_UPLOAD_AP_SSID[0] == '\0')
+  {
+    show_status_bar_toast(renderer, "WiFi upload not configured");
+    return false;
+  }
+
+  if (wifi_uploader.isRunning())
+  {
+    return true;
+  }
+
+  WiFi.mode(WIFI_AP);
+  bool ap_ok = WiFi.softAP(WIFI_UPLOAD_AP_SSID, WIFI_UPLOAD_AP_PASSWORD, WIFI_UPLOAD_AP_CHANNEL);
+  if (!ap_ok)
+  {
+    show_status_bar_toast(renderer, "WiFi AP start failed");
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_OFF);
+    return false;
+  }
+
+  if (!wifi_uploader.begin(WIFI_UPLOAD_PORT, WIFI_UPLOAD_PATH))
+  {
+    show_status_bar_toast(renderer, "WiFi upload start failed");
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_OFF);
+    return false;
+  }
+
+  IPAddress ip = WiFi.softAPIP();
+  char toast[96];
+  snprintf(toast, sizeof(toast), "WiFi AP %s %s", WIFI_UPLOAD_AP_SSID, ip.toString().c_str());
+  show_status_bar_toast(renderer, toast);
+  return true;
+}
+
+static void stop_wifi_uploader(Renderer *renderer, bool show_toast)
+{
+  if (!wifi_uploader.isRunning())
+  {
+    return;
+  }
+
+  wifi_uploader.end();
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_OFF);
+
+  if (show_toast)
+  {
+    show_status_bar_toast(renderer, "WiFi upload stopped");
+  }
+}
+#endif
 
 void handleUserInteraction(Renderer *renderer, UIAction ui_action, bool needs_redraw)
 {
@@ -2183,6 +2275,27 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
         show_status_bar_toast(renderer, toast);
         renderReaderMenu(renderer);
       }
+#ifdef BOARD_TYPE_M5_PAPER
+      else if (reader_menu_selected == 11)
+      {
+        if (wifi_uploader.isRunning())
+        {
+          stop_wifi_uploader(renderer, true);
+        }
+        else
+        {
+          start_wifi_uploader(renderer);
+        }
+        renderReaderMenu(renderer);
+      }
+      else if (reader_menu_selected == 12)
+      {
+        save_app_settings(renderer);
+        reader_menu_advanced = false;
+        reader_menu_selected = 0;
+        renderReaderMenu(renderer);
+      }
+#else
       else if (reader_menu_selected == 11)
       {
         save_app_settings(renderer);
@@ -2190,6 +2303,7 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
         reader_menu_selected = 0;
         renderReaderMenu(renderer);
       }
+#endif
     }
     break;
   case NONE:
@@ -2198,9 +2312,3 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
     break;
   }
 }
-
-
-
-
-
-
