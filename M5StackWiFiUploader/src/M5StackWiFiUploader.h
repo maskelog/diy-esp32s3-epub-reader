@@ -231,6 +231,12 @@ private:
     std::map<uint8_t, UploadSession> _activeSessions;
     uint8_t _nextSessionId;
 
+    bool _lastUploadSuccess;
+    String _lastUploadMessage;
+    String _lastUploadFilename;
+    uint32_t _lastUploadExpectedSize;
+    uint32_t _lastUploadSize;
+
     // コールバック
     UploadCallback _onUploadStart;
     ProgressCallback _onUploadProgress;

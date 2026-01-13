@@ -1,6 +1,7 @@
 #include "M5StackWiFiUploader.h"
 #include <WiFi.h>
 #include <cstdarg>
+#include <esp_task_wdt.h>
 
 // ============================================================================
 // コンストラクタ・デストラクタ
@@ -17,10 +18,14 @@ M5StackWiFiUploader::M5StackWiFiUploader(uint16_t port)
       _webSocketEnabled(false),
       _overwriteProtection(false),
       _totalUploaded(0),
-      _nextSessionId(0) {
+      _nextSessionId(0),
+      _lastUploadSuccess(false),
+      _lastUploadExpectedSize(0),
+      _lastUploadSize(0) {
     // デフォルト許可拡張子を設定
     _allowedExtensions = {
         "jpg", "jpeg", "png", "gif", "bmp",
+        "epub",
         "bin", "dat", "txt", "csv", "json",
         "zip", "rar", "7z", "tar", "gz"
     };
@@ -333,26 +338,27 @@ void M5StackWiFiUploader::_handleRoot() {
 <body>
     <div class="container">
         <div class="language-selector">
-            <button onclick="setLanguage('ja')" id="lang-ja" class="active">日本語</button>
+            <button onclick="setLanguage('ja')" id="lang-ja" class="active">???</button>
             <button onclick="setLanguage('en')" id="lang-en">English</button>
+            <button onclick="setLanguage('ko')" id="lang-ko">???</button>
         </div>
         
         <h1 id="title">M5Stack WiFi File Uploader</h1>
-        <p id="description">ファイルをドラッグ&ドロップするか、下のボタンをクリックしてアップロードしてください。</p>
+        <p id="description">???????????????????????????????????????????</p>
         
         <div class="upload-area" id="uploadArea">
-            <p>ここにファイルをドラッグ&ドロップ</p>
+            <p>?????????????????</p>
             <input type="file" id="fileInput" multiple>
-            <button onclick="document.getElementById('fileInput').click()">ファイルを選択</button>
+            <button onclick="document.getElementById('fileInput').click()">???????</button>
         </div>
 
         <div id="status"></div>
         <div id="uploadProgress"></div>
 
         <div class="file-list">
-            <h2 id="fileListTitle">SDカード内のファイル</h2>
-            <button onclick="loadFilesList()" class="success" id="refreshBtn">更新</button>
-            <div id="filesList" class="loading">読み込み中...</div>
+            <h2 id="fileListTitle">SD?????????</h2>
+            <button onclick="loadFilesList()" class="success" id="refreshBtn">??</button>
+            <div id="filesList" class="loading">?????...</div>
         </div>
     </div>
 
@@ -361,22 +367,27 @@ void M5StackWiFiUploader::_handleRoot() {
         const translations = {
             ja: {
                 title: 'M5Stack WiFi File Uploader',
-                description: 'ファイルをドラッグ&ドロップするか、下のボタンをクリックしてアップロードしてください。',
-                dropText: 'ここにファイルをドラッグ&ドロップ',
-                selectFile: 'ファイルを選択',
-                fileListTitle: 'SDカード内のファイル',
-                refresh: '更新',
-                loading: '読み込み中...',
-                noFiles: 'ファイルがありません',
-                download: 'ダウンロード',
-                delete: '削除',
-                downloading: 'をダウンロード中...',
-                deleting: 'を削除中...',
-                uploadSuccess: 'ファイルが正常にアップロードされました',
-                uploadError: 'ファイルのアップロードに失敗しました',
-                deleteSuccess: 'ファイルが正常に削除されました',
-                deleteError: 'ファイルの削除に失敗しました',
-                listError: 'ファイル一覧の取得に失敗しました'
+                description: '???????????????????????????????????????????',
+                dropText: '?????????????????',
+                selectFile: '???????',
+                fileListTitle: 'SD?????????',
+                refresh: '??',
+                loading: '?????...',
+                noFiles: '??????????',
+                download: '??????',
+                delete: '??',
+                downloading: ' ???????...',
+                deleting: ' ???...',
+                uploadSuccess: '????????',
+                uploadError: '????????',
+                deleteSuccess: '??????',
+                deleteError: '?????????',
+                listError: '????????????????',
+                confirmDelete: '{filename} ????????',
+                filenameHeader: '?????',
+                sizeHeader: '???',
+                modifiedHeader: '????',
+                actionsHeader: '??'
             },
             en: {
                 title: 'M5Stack WiFi File Uploader',
@@ -395,7 +406,36 @@ void M5StackWiFiUploader::_handleRoot() {
                 uploadError: 'Failed to upload file',
                 deleteSuccess: 'File deleted successfully',
                 deleteError: 'Failed to delete file',
-                listError: 'Failed to get file list'
+                listError: 'Failed to get file list',
+                confirmDelete: 'Delete {filename}?',
+                filenameHeader: 'Filename',
+                sizeHeader: 'Size',
+                modifiedHeader: 'Modified',
+                actionsHeader: 'Actions'
+            },
+            ko: {
+                title: 'M5Stack WiFi ?? ???',
+                description: '??? ??? ??? ??? ?? ??? ?? ??????.',
+                dropText: '??? ??? ??? & ??',
+                selectFile: '?? ??',
+                fileListTitle: 'SD ?? ?? ??',
+                refresh: '????',
+                loading: '???? ?...',
+                noFiles: '??? ????',
+                download: '????',
+                delete: '??',
+                downloading: ' ???? ?...',
+                deleting: ' ?? ?...',
+                uploadSuccess: '??? ??',
+                uploadError: '??? ??',
+                deleteSuccess: '?? ??',
+                deleteError: '?? ??',
+                listError: '?? ??? ???? ?????',
+                confirmDelete: '{filename} ?(?) ??????',
+                filenameHeader: '???',
+                sizeHeader: '??',
+                modifiedHeader: '?? ??',
+                actionsHeader: '??'
             }
         };
 
@@ -407,6 +447,7 @@ void M5StackWiFiUploader::_handleRoot() {
             // 言語ボタンの状態を更新
             document.getElementById('lang-ja').classList.toggle('active', lang === 'ja');
             document.getElementById('lang-en').classList.toggle('active', lang === 'en');
+            document.getElementById('lang-ko').classList.toggle('active', lang === 'ko');
             
             // テキストを更新
             const t = translations[lang];
@@ -477,15 +518,21 @@ void M5StackWiFiUploader::_handleRoot() {
             });
 
             xhr.addEventListener('load', () => {
-                if (xhr.status === 200) {
-                    const response = JSON.parse(xhr.responseText);
-                    const t = translations[currentLang];
+                const t = translations[currentLang];
+                let response = null;
+                try {
+                    response = JSON.parse(xhr.responseText);
+                } catch (e) {
+                    response = null;
+                }
+
+                if (xhr.status >= 200 && xhr.status < 300 && response && response.success) {
                     showStatus('success', `${file.name} ${t.uploadSuccess}`);
                     document.getElementById(progressId).remove();
                     loadFilesList();
                 } else {
-                    const t = translations[currentLang];
-                    showStatus('error', `${file.name} ${t.uploadError}: ${xhr.status}`);
+                    const detail = response && response.message ? ` (${response.message})` : '';
+                    showStatus('error', `${file.name} ${t.uploadError}${detail}`);
                 }
             });
 
@@ -512,10 +559,10 @@ void M5StackWiFiUploader::_handleRoot() {
                         table.innerHTML = `
                             <thead>
                                 <tr>
-                                    <th>${currentLang === 'ja' ? 'ファイル名' : 'Filename'}</th>
-                                    <th>${currentLang === 'ja' ? 'サイズ' : 'Size'}</th>
-                                    <th>${currentLang === 'ja' ? '更新日時' : 'Modified'}</th>
-                                    <th>${currentLang === 'ja' ? '操作' : 'Actions'}</th>
+                                    <th>${t.filenameHeader}</th>
+                                    <th>${t.sizeHeader}</th>
+                                    <th>${t.modifiedHeader}</th>
+                                    <th>${t.actionsHeader}</th>
                                 </tr>
                             </thead>
                             <tbody id="filesTableBody"></tbody>
@@ -557,7 +604,7 @@ void M5StackWiFiUploader::_handleRoot() {
             const t = translations[currentLang];
             console.log(`[DEBUG] deleteFile called with: ${filename}`);
             
-if (confirm(currentLang === 'ja' ? `${filename} を削除しますか？` : `Delete ${filename}?`)) {
+            if (confirm(t.confirmDelete.replace('{filename}', filename))) {
                 const url = `/api/delete?filename=${encodeURIComponent(filename)}`;
                 console.log(`[DEBUG] Sending DELETE request to: ${url}`);
                 
@@ -624,9 +671,41 @@ if (confirm(currentLang === 'ja' ? `${filename} を削除しますか？` : `Del
 }
 
 void M5StackWiFiUploader::_handleUploadHTTP() {
-    // マルチパートアップロードが完了した後に呼ばれる
     Serial.println("[DEBUG] _handleUploadHTTP called");
-    _sendJSONResponse(true, "File uploaded successfully");
+
+    const String filename = _lastUploadFilename;
+    if (filename.isEmpty()) {
+        _sendJSONResponse(false, "No upload session");
+        return;
+    }
+
+    const String finalPath = _uploadPath + "/" + filename;
+    if (!_lastUploadSuccess) {
+        const char* message = _lastUploadMessage.isEmpty() ? "Upload failed" : _lastUploadMessage.c_str();
+        _sendJSONResponse(false, message);
+        return;
+    }
+
+    if (!SD.exists(finalPath.c_str())) {
+        _sendJSONResponse(false, "File not found after upload");
+        return;
+    }
+
+    if (_lastUploadExpectedSize > 0) {
+        File verify = SD.open(finalPath.c_str(), FILE_READ);
+        if (!verify) {
+            _sendJSONResponse(false, "File open failed after upload");
+            return;
+        }
+        const uint32_t actualSize = verify.size();
+        verify.close();
+        if (actualSize != _lastUploadExpectedSize) {
+            _sendJSONResponse(false, "Upload size mismatch");
+            return;
+        }
+    }
+
+    _sendJSONResponse(true, "File uploaded successfully", filename.c_str());
 }
 
 void M5StackWiFiUploader::_handleUploadData() {
@@ -635,100 +714,184 @@ void M5StackWiFiUploader::_handleUploadData() {
     static File uploadFile;
     static String currentFilename;
     static uint32_t currentFilesize;
-    
+    static uint32_t expectedFilesize;
+    static String tempPath;
+    static String finalPath;
+    static uint32_t last_wdt_kick_ms;
+    static bool upload_ok;
+    static String last_error;
+
     Serial.printf("[DEBUG] upload.status = %d\n", upload.status);
-    
+
     if (upload.status == UPLOAD_FILE_START) {
         currentFilename = upload.filename;
         currentFilesize = 0;
-        
+        expectedFilesize = upload.totalSize;
+        last_wdt_kick_ms = millis();
+        upload_ok = true;
+        last_error = "";
+        _lastUploadSuccess = false;
+        _lastUploadExpectedSize = expectedFilesize;
+        _lastUploadSize = 0;
+        _lastUploadMessage = "Upload in progress";
+        _lastUploadFilename = "";
+
         _log(3, "Upload Start: %s", currentFilename.c_str());
-        
-        // ファイル名を検証
+
         if (!_isValidFilename(currentFilename.c_str())) {
             _log(2, "Invalid filename: %s", currentFilename.c_str());
+            upload_ok = false;
+            last_error = "Invalid filename";
+            _lastUploadMessage = last_error;
             return;
         }
-        
+
         currentFilename = _sanitizeFilename(currentFilename.c_str());
-        
-        // 拡張子を検証
+        _lastUploadFilename = currentFilename;
+
         if (!_isValidExtension(currentFilename.c_str())) {
             _log(2, "Invalid file extension: %s", currentFilename.c_str());
+            upload_ok = false;
+            last_error = "Invalid extension";
+            _lastUploadMessage = last_error;
             return;
         }
-        
-        // ファイルパスを作成
-        String fullPath = _uploadPath + "/" + currentFilename;
-        
-        // 上書き保護をチェック
-        if (_overwriteProtection && SD.exists(fullPath.c_str())) {
+
+        finalPath = _uploadPath + "/" + currentFilename;
+        tempPath = _uploadPath + "/._" + currentFilename + ".part";
+
+        if (_overwriteProtection && SD.exists(finalPath.c_str())) {
             _log(2, "File already exists (overwrite protection): %s", currentFilename.c_str());
+            upload_ok = false;
+            last_error = "File exists";
+            _lastUploadMessage = last_error;
             return;
         }
-        
-        // ファイルを開く
-        uploadFile = SD.open(fullPath.c_str(), FILE_WRITE);
+
+        if (SD.exists(tempPath.c_str())) {
+            SD.remove(tempPath.c_str());
+        }
+
+        uploadFile = SD.open(tempPath.c_str(), FILE_WRITE);
         if (!uploadFile) {
-            _log(1, "Failed to open file for writing: %s", fullPath.c_str());
+            _log(1, "Failed to open temp file for writing: %s", tempPath.c_str());
+            upload_ok = false;
+            last_error = "Open failed";
+            _lastUploadMessage = last_error;
             return;
         }
-        
-        // コールバック: アップロード開始
+
         if (_onUploadStart) {
             _onUploadStart(currentFilename.c_str(), upload.totalSize);
         }
-        
+
     } else if (upload.status == UPLOAD_FILE_WRITE) {
         if (uploadFile) {
-            // ファイルサイズをチェック
             currentFilesize += upload.currentSize;
             if (currentFilesize > _maxFileSize) {
                 _log(2, "File too large: %d bytes (max: %d)", currentFilesize, _maxFileSize);
                 uploadFile.close();
-                String fullPath = _uploadPath + "/" + currentFilename;
-                SD.remove(fullPath.c_str());
+                uploadFile = File();
+                SD.remove(tempPath.c_str());
+                upload_ok = false;
+                last_error = "Too large";
+                _lastUploadMessage = last_error;
                 return;
             }
-            
-            // データを書き込み
+
             size_t written = uploadFile.write(upload.buf, upload.currentSize);
             if (written != upload.currentSize) {
                 _log(1, "Write error: expected %d, wrote %d", upload.currentSize, written);
+                uploadFile.close();
+                uploadFile = File();
+                SD.remove(tempPath.c_str());
+                upload_ok = false;
+                last_error = "Write failed";
+                _lastUploadMessage = last_error;
+                if (_onUploadError) {
+                    _onUploadError(currentFilename.c_str(), ERR_UNKNOWN, "Write failed");
+                }
+                return;
             }
-            
-            // コールバック: 進捗
+
+            _lastUploadSize = currentFilesize;
             if (_onUploadProgress) {
                 _onUploadProgress(currentFilename.c_str(), currentFilesize, upload.totalSize);
             }
+            uint32_t now_ms = millis();
+            if (now_ms - last_wdt_kick_ms >= 200) {
+                esp_task_wdt_reset();
+                last_wdt_kick_ms = now_ms;
+            }
+            delay(1);
+            yield();
         }
-        
+
     } else if (upload.status == UPLOAD_FILE_END) {
         if (uploadFile) {
             uploadFile.close();
+            uploadFile = File();
+
+            if (expectedFilesize > 0 && currentFilesize != expectedFilesize) {
+                _log(2, "Upload size mismatch: %d != %d", currentFilesize, expectedFilesize);
+                SD.remove(tempPath.c_str());
+                upload_ok = false;
+                last_error = "Size mismatch";
+                _lastUploadMessage = last_error;
+                if (_onUploadError) {
+                    _onUploadError(currentFilename.c_str(), ERR_UNKNOWN, "Size mismatch");
+                }
+                return;
+            }
+            if (expectedFilesize == 0) {
+                expectedFilesize = currentFilesize;
+                _lastUploadExpectedSize = currentFilesize;
+            }
+
+            if (!_overwriteProtection && SD.exists(finalPath.c_str())) {
+                SD.remove(finalPath.c_str());
+            }
+
+            if (!SD.rename(tempPath.c_str(), finalPath.c_str())) {
+                _log(1, "Failed to rename temp file to final: %s", finalPath.c_str());
+                SD.remove(tempPath.c_str());
+                upload_ok = false;
+                last_error = "Rename failed";
+                _lastUploadMessage = last_error;
+                if (_onUploadError) {
+                    _onUploadError(currentFilename.c_str(), ERR_UNKNOWN, "Rename failed");
+                }
+                return;
+            }
+
             _totalUploaded += currentFilesize;
+            _lastUploadSuccess = true;
+            _lastUploadMessage = "Upload complete";
+            _lastUploadSize = currentFilesize;
             _log(3, "Upload Complete: %s (%d bytes)", currentFilename.c_str(), currentFilesize);
-            
-            // コールバック: アップロード完了
+
             if (_onUploadComplete) {
                 _onUploadComplete(currentFilename.c_str(), currentFilesize, true);
             }
         }
-        
+
     } else if (upload.status == UPLOAD_FILE_ABORTED) {
         if (uploadFile) {
             uploadFile.close();
-            String fullPath = _uploadPath + "/" + currentFilename;
-            SD.remove(fullPath.c_str());
+            uploadFile = File();
+            SD.remove(tempPath.c_str());
             _log(2, "Upload Aborted: %s", currentFilename.c_str());
-            
-            // コールバック: エラー
+            upload_ok = false;
+            last_error = "Upload aborted";
+            _lastUploadMessage = last_error;
+
             if (_onUploadError) {
                 _onUploadError(currentFilename.c_str(), ERR_UNKNOWN, "Upload aborted");
             }
         }
     }
 }
+
 
 void M5StackWiFiUploader::_handleListFiles() {
     std::vector<String> files = listFiles();
