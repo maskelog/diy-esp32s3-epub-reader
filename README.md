@@ -89,7 +89,7 @@ git submodule update --init --recursive
 - The M5Paper firmware uses M5GFX/M5Unified for display and input.
 - EPUBs should live in `/Books` on the SD card.
 - Optional sleep image: `/Sleep/bg.png` (540x960 PNG, no transparency).
-- WiFi SD management: set `WIFI_UPLOAD_AP_SSID`/`WIFI_UPLOAD_AP_PASSWORD` in `src/config.h`, rebuild, connect your phone to the AP, then open the reader menu -> `More` -> `WiFi upload` to start the web UI (uploads go to `/Books`).
+- **WiFi EPUB upload**: Set `WIFI_UPLOAD_AP_SSID`/`WIFI_UPLOAD_AP_PASSWORD` in `src/config.h`, rebuild, connect your phone/computer to the WiFi AP, then open the reader menu -> `More` -> `WiFi upload` to start the web UI. EPUB files uploaded via WiFi will be saved to `/Books` on the SD card. This feature uses the [M5StackWiFiUploader](https://github.com/tomorrow56/M5StackWiFiUploader) library by tomorrow56 - many thanks for this excellent library!
 
 For device setup, SD card layout, and usage instructions, see:
 
