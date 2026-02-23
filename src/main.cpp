@@ -563,13 +563,13 @@ static void renderReaderMenu(Renderer *renderer)
   if (!reader_menu_advanced)
   {
     items_total = READER_MENU_BASIC_ITEMS;
-    labels[0] = "Return to book";
-    labels[1] = "Bookmark";
-    labels[2] = "Table of contents";
-    labels[3] = "Back to library";
-    labels[4] = "More";
     // Use ASCII-friendly "icon" prefixes so they render on limited fonts.
-    labels[5] = "[R] Refresh screen";
+    labels[0] = "[R] Refresh screen";
+    labels[1] = "Return to book";
+    labels[2] = "Bookmark";
+    labels[3] = "Table of contents";
+    labels[4] = "Back to library";
+    labels[5] = "More";
     labels[6] = "[Zz] Sleep";
   }
   else
@@ -2017,6 +2017,17 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
     {
       if (reader_menu_selected == 0)
       {
+        // Full screen refresh of the current reading page to
+        // mitigate ghosting.
+        ui_state = READING_EPUB;
+        renderer->reset();
+        if (reader)
+        {
+          reader->render();
+        }
+      }
+      else if (reader_menu_selected == 1)
+      {
         ui_state = READING_EPUB;
         renderer->clear_screen();
         if (reader)
@@ -2024,7 +2035,7 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
           reader->render();
         }
       }
-      else if (reader_menu_selected == 1)
+      else if (reader_menu_selected == 2)
       {
         if (epub_list_state.selected_item >= 0 && epub_list_state.selected_item < epub_list_state.num_epubs)
         {
@@ -2045,7 +2056,7 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
           reader->render();
         }
       }
-      else if (reader_menu_selected == 2)
+      else if (reader_menu_selected == 3)
       {
         ui_state = SELECTING_TABLE_CONTENTS;
         if (contents)
@@ -2069,7 +2080,7 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
         contents->set_needs_redraw();
         handleEpubTableContents(renderer, NONE, true);
       }
-      else if (reader_menu_selected == 3)
+      else if (reader_menu_selected == 4)
       {
         // Back to library: force a full-screen refresh and show the
         // same "Book library is loading" splash used on cold boot
@@ -2084,22 +2095,11 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
         }
         handleEpubList(renderer, NONE, true);
       }
-      else if (reader_menu_selected == 4)
+      else if (reader_menu_selected == 5)
       {
         reader_menu_advanced = true;
         reader_menu_selected = 0;
         renderReaderMenu(renderer);
-      }
-      else if (reader_menu_selected == 5)
-      {
-        // Full screen refresh of the current reading page to
-        // mitigate ghosting.
-        ui_state = READING_EPUB;
-        renderer->reset();
-        if (reader)
-        {
-          reader->render();
-        }
       }
       else if (reader_menu_selected == 6)
       {

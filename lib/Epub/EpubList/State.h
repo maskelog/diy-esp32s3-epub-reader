@@ -9,7 +9,7 @@ const int MAX_TITLE_SIZE = 100;
 const int EPUB_GRID_ROWS = 3;
 const int EPUB_GRID_COLUMNS = 3;
 const int EPUB_LIST_ITEMS_PER_PAGE = 5;
-const int EPUB_TOC_ITEMS_PER_PAGE = 6;
+const int EPUB_TOC_ITEMS_PER_PAGE = 7;
 const int EPUB_LIST_BOTTOM_BAR_HEIGHT = 80;
 
 // nice and simple state that can be persisted easily
