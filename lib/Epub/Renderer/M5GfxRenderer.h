@@ -4,8 +4,11 @@
 #include "Renderer.h"
 
 #ifndef EPD_FULL_REFRESH_INTERVAL
-// Reduce full refresh frequency to minimize flashes while limiting ghosting.
-#define EPD_FULL_REFRESH_INTERVAL 30
+// GL16 ghost-clearing refresh interval. GL16 is gentler than GC16 (no big
+// white flash) but still removes residual ghosting left by DU page-flips.
+// Lower value = more frequent cleanup (trades frequency for less jarring
+// appearance compared to the old epd_quality/GC16 approach).
+#define EPD_FULL_REFRESH_INTERVAL 20
 #endif
 
 class M5GfxRenderer : public Renderer

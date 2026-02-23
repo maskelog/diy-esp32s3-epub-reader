@@ -216,17 +216,21 @@ void M5GfxRenderer::flush_display()
     {
         m_refresh_count++;
 
-        // Periodic full refresh to clear ghosting (optional, less frequent)
+        // Periodic ghost-clearing refresh using GL16 (epd_text).
+        // GL16 is specifically designed to clear residual ghosting left by DU
+        // (epd_fast) page-flips without the full visible white flash that GC16
+        // (epd_quality) causes. This gives cleaner text with far less visual
+        // disruption than the old epd_quality approach.
         if (EPD_FULL_REFRESH_INTERVAL > 0 && m_refresh_count >= EPD_FULL_REFRESH_INTERVAL)
         {
-            M5.Display.setEpdMode(epd_mode_t::epd_quality);
+            M5.Display.setEpdMode(epd_mode_t::epd_text);   // GL16: ghost-clearing
             framebuffer->pushSprite(0, 0);
-            M5.Display.setEpdMode(epd_mode_t::epd_fast);
+            M5.Display.setEpdMode(epd_mode_t::epd_fast);   // DU: back to fast mode
             m_refresh_count = 0;
         }
         else
         {
-            // Normal fast partial refresh (no flickering)
+            // DU (epd_fast): 260 ms, monochrome, minimal visible flicker
             framebuffer->pushSprite(0, 0);
         }
     }
@@ -236,7 +240,9 @@ void M5GfxRenderer::flush_display_full()
 {
     if (framebuffer)
     {
-        // Force full quality refresh
+        // GC16 full quality refresh: eliminates all ghosting. Use this only
+        // when the user explicitly requests a screen refresh or for important
+        // single-shot displays (e.g., sleep cover image).
         M5.Display.setEpdMode(epd_mode_t::epd_quality);
         framebuffer->pushSprite(0, 0);
         M5.Display.setEpdMode(epd_mode_t::epd_fast);
@@ -263,7 +269,26 @@ int M5GfxRenderer::get_line_height()
 
 void M5GfxRenderer::reset()
 {
-    M5.Display.clear(true);
+    if (framebuffer)
+    {
+        // Clear the framebuffer to white so the next render starts clean.
+        framebuffer->fillSprite(TFT_WHITE);
+        // Push using GC16 (epd_quality) for a full waveform refresh that
+        // completely eliminates any accumulated ghosting. This is only called
+        // for major UI transitions (library ↔ reader, explicit "Refresh screen")
+        // where a brief quality refresh is acceptable.
+        M5.Display.setEpdMode(epd_mode_t::epd_quality);
+        framebuffer->pushSprite(0, 0);
+        M5.Display.setEpdMode(epd_mode_t::epd_fast);
+        m_refresh_count = 0;
+    }
+    else
+    {
+        // Fallback: no framebuffer available
+        M5.Display.setEpdMode(epd_mode_t::epd_quality);
+        M5.Display.clear();
+        M5.Display.setEpdMode(epd_mode_t::epd_fast);
+    }
 }
 
 // These methods are not fully implemented for brevity, but they should be mapped to M5GFX functions.
@@ -288,7 +313,10 @@ void M5GfxRenderer::fill_circle(int x, int y, int r, uint8_t color)
         framebuffer->fillCircle(x, y, r, color);
 }
 void M5GfxRenderer::needs_gray(uint8_t color) { /* M5GFX handles this automatically */ }
-bool M5GfxRenderer::has_gray() { return true; }
+// Return false so RubbishHtmlParser::render_page() skips the intermediate white-screen
+// flush that is only needed for epdiy-based devices (see comment in RubbishHtmlParser.cpp).
+// That intermediate flush was the cause of the full-screen flicker on every page turn.
+bool M5GfxRenderer::has_gray() { return false; }
 void M5GfxRenderer::show_busy()
 {
     if (!framebuffer)

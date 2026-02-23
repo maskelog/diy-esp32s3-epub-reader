@@ -43,6 +43,35 @@ Other environments and boards from the original project are no longer
 maintained in this configuration; the goal is a dedicated, optimized M5Paper
 e-reader firmware.
 
+### EPD refresh strategy (M5Paper / IT8951)
+
+The M5Paper uses an IT8951 e-ink controller driven through M5GFX. Three
+waveform modes are used, selected per-operation to balance speed and
+image quality:
+
+| M5GFX mode | IT8951 waveform | Time | Used for |
+|---|---|---|---|
+| `epd_fast` | DU (Direct Update) | ~260 ms | Normal page turns |
+| `epd_text` | GL16 (ghost-clearing) | ~450 ms | Periodic ghost cleanup |
+| `epd_quality` | GC16 (full quality) | ~450 ms | Major UI transitions / explicit refresh |
+
+All rendering goes through a full-screen PSRAM framebuffer (`LGFX_Sprite`).
+The display is never written directly during normal reading.
+
+- **Page turns** use DU (`epd_fast`) — the fastest mode with no white flash.
+- **Every 20 page turns** a GL16 (`epd_text`) cleanup pass quietly removes
+  residual ghosting without the visible white flash that GC16 produces.
+- **Library navigation, "Refresh screen" menu item, or waking from sleep**
+  trigger a single GC16 (`epd_quality`) full-quality refresh to eliminate
+  all accumulated ghosting.
+
+> **Bug fixed**: `M5GfxRenderer::has_gray()` now returns `false`.
+> Previously it returned `true`, which caused `RubbishHtmlParser::render_page()`
+> to push a blank white framebuffer to the display before every page render
+> (an intermediate flush designed only for epdiy devices). This produced a
+> full-screen white flicker on every single page turn. Returning `false`
+> skips that intermediate flush entirely.
+
 It will parse ePub files that can be downloaded from places such as [Project Gutenberg](https://www.gutenberg.org/).
 
 It has limited support for formating - the CSS content of the ePub file is not parsed, so we just use the standard [HTML tags](https://www.scaler.com/topics/html/html-tags/) such as `<h1>`,`<h2>` etc.. and `<b>` and `<i>`.
