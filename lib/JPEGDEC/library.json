@@ -16,5 +16,13 @@
   "license": "Apache License 2.0",
   "homepage": "https://github.com/bitbank2/JPEGDEC",
   "frameworks": "*",
-  "platforms": "*"
+  "platforms": "*",
+  "build": {
+    "srcFilter": [
+      "+<*>",
+      "-<s3_simd_420.S>",
+      "-<s3_simd_444.S>",
+      "-<s3_simd_dequant.S>"
+    ]
+  }
 }

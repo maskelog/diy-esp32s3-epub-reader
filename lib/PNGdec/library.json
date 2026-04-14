@@ -1,0 +1,9 @@
+{
+  "name": "PNGdec",
+  "build": {
+    "srcFilter": [
+      "+<*>",
+      "-<s3_simd_rgb565.S>"
+    ]
+  }
+}
