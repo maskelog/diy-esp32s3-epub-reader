@@ -1,5 +1,9 @@
 # Agent Notes (diy-esp32s3-epub-reader)
 
+## Shared Workflow Memory
+- Before making changes, also read `MEMORY.md`.
+- `MEMORY.md` contains repository-wide working rules intended to be shared across Codex, Claude Code, Gemini Code, and other coding agents.
+
 ## What Changed
 - Added manual bookmark flow and persistence; bookmark indicator shown in status bar and menu.
 - Adjusted sleep image handling to support SD `/Sleep/bg.png` and cover mode; added more logging.
