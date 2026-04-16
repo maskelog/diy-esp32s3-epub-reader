@@ -1,0 +1,97 @@
+ *  Executing task: C:\Users\sh953\.platformio\penv\Scripts\platformio.exe device monitor --port COM4 
+
+--- Terminal on COM4 | 115200 8-N-1
+--- Available filters and text transformations: colorize, debug, default, direct, esp32_exception_decoder, hexlify, log2file, nocontrol, printable, send_on_enter, time
+--- More details at https://bit.ly/pio-monitor-filters
+--- Quit: Ctrl+C | Menu: Ctrl+T | Help: Ctrl+T followed by Ctrl+H
+E (804) esp_core_dump_flash: No core dump ␀&�ѥѥ���found!
+E (804) esp_core_dump_flash: No core dump partition found!
+[  1763][E][main.cpp:995] load_app_settings(): [main] Settings read: 4 bytes (expected 4), version=1, flags=0x51
+[  1773][E][main.cpp:1007] load_app_settings(): [main] Settings applied: grid_view=0
+[  1783][E][main.cpp:1022] load_app_settings(): [main] Settings file sleep_mode=0 (max valid=3)
+[  1794][E][main.cpp:1026] load_app_settings(): [main] Sleep mode loaded: 0
+[  1803][E][main.cpp:208] setup(): [main] >>> Normal boot - loading library
+[  2895][E][main.cpp:211] setup(): [main] >>> Library loading screen displayed
+[  2902][E][main.cpp:214] setup(): [main] >>> Creating EPUB list
+[  2910][E][main.cpp:216] setup(): [main] >>> Loading EPUBs from /Books
+[  2954][E][main.cpp:218] setup(): [main] >>> EPUB list loaded, count=4
+[  2960][E][main.cpp:230] setup(): [main] >>> Calling handleUserInteraction from setup
+[  2970][E][main.cpp:1225] handleUserInteraction(): [main] >>> handleUserInteraction START: action=0, redraw=1, wdt_removed=0
+[  2983][E][EpubList.cpp:415] render(): [PUBLIST] >>> EpubList::render() START, num_epubs=4, selected=0
+[  3088][E][EpubList.cpp:569] render(): [PUBLIST] List: Rendering item 1/4: A Christmas Carol in Prose; Being a Ghost Story of Christmas
+[  3439][E][EpubList.cpp:569] render(): [PUBLIST] List: Rendering item 2/4: 살인자의 기억법
+[  4156][E][EpubList.cpp:569] render(): [PUBLIST] List: Rendering item 3/4: 오만과 편견
+[  4458][E][EpubList.cpp:569] render(): [PUBLIST] List: Rendering item 4/4: 오만과 편견-한글
+[  4774][E][EpubList.cpp:785] render(): [PUBLIST] <<< EpubList::render() END, page=0
+[  4782][E][main.cpp:1281] handleUserInteraction(): [main] <<< handleUserInteraction END: re-adding wdt=0
+[  4794][E][main.cpp:232] setup(): [main] >>> handleUserInteraction returned in setup
+[  4803][E][main.cpp:235] setup(): [main] >>> Drawing battery level
+[  4812][E][main.cpp:240] setup(): [main] >>> touch_controls->render
+[  4820][E][main.cpp:242] setup(): [main] >>> renderer->flush_display() START
+[  5135][E][main.cpp:244] setup(): [main] >>> renderer->flush_display() END
+[  5142][E][main.cpp:247] setup(): [main] >>> Re-adding watchdog
+[  5150][E][main.cpp:254] setup(): [main] >>> Setup complete!
+[ 15128][E][M5PaperTouchControls.cpp:23] run(): [M5Touch] Touch detected at x=260, y=615, width=540
+[ 15137][E][M5PaperTouchControls.cpp:37] run(): [M5Touch] Touch zone: CENTER -> SELECT
+[ 15147][E][main.cpp:1225] handleUserInteraction(): [main] >>> handleUserInteraction START: action=3, redraw=0, wdt_removed=1
+E (15147) PUBINDEX: >>> EpubToc::load() START
+E (15586) EPUB: >>> Epub::load() START: /Books/A Christmas Carol in Prose.epub
+E (15587) EPUB: >>> ZipFile created
+E (15604) EPUB: >>> content.opf found: OEBPS/content.opf
+E (15621) EPUB: >>> content.opf parsed
+E (15638) EPUB: >>> Epub::load() END
+[ 15763][E][main.cpp:1281] handleUserInteraction(): [main] <<< handleUserInteraction END: re-adding wdt=1
+[ 17934][E][M5PaperTouchControls.cpp:23] run(): [M5Touch] Touch detected at x=519, y=543, width=540
+[ 17943][E][M5PaperTouchControls.cpp:32] run(): [M5Touch] Touch zone: RIGHT -> DOWN
+[ 17953][E][main.cpp:1225] handleUserInteraction(): [main] >>> handleUserInteraction START: action=2, redraw=0, wdt_removed=1
+[ 17975][E][main.cpp:1281] handleUserInteraction(): [main] <<< handleUserInteraction END: re-adding wdt=1
+[ 18642][E][M5PaperTouchControls.cpp:23] run(): [M5Touch] Touch detected at x=299, y=651, width=540
+[ 18651][E][M5PaperTouchControls.cpp:37] run(): [M5Touch] Touch zone: CENTER -> SELECT
+[ 18661][E][main.cpp:1225] handleUserInteraction(): [main] >>> handleUserInteraction START: action=3, redraw=0, wdt_removed=1
+E (18661) EREADER: >>> EpubReader::load() START
+E (19120) EPUB: >>> Epub::load() START: /Books/A Christmas Carol in Prose.epub
+E (19121) EPUB: >>> ZipFile created
+E (19138) EPUB: >>> content.opf found: OEBPS/content.opf
+E (19155) EPUB: >>> content.opf parsed
+E (19172) EPUB: >>> Epub::load() END
+[ 19207][E][main.cpp:369] handleEpub(): [main] >>> handleEpub START: action=0
+[ 19214][E][main.cpp:454] handleEpub(): [main] >>> Rendering page via EpubReader
+E (19220) EREADER: >>> EpubReader::render() START
+E (19660) EREADER: >>> Parse and layout section 1
+E (20655) EREADER: <<< Layout complete, 54 pages
+[ 21134][E][main.cpp:459] handleEpub(): [main] >>> Page rendering complete
+[ 21151][E][main.cpp:468] handleEpub(): [main] <<< handleEpub END
+[ 21157][E][main.cpp:1281] handleUserInteraction(): [main] <<< handleUserInteraction END: re-adding wdt=1
+[ 22373][E][M5PaperTouchControls.cpp:23] run(): [M5Touch] Touch detected at x=300, y=661, width=540
+[ 22382][E][M5PaperTouchControls.cpp:37] run(): [M5Touch] Touch zone: CENTER -> SELECT
+[ 22392][E][main.cpp:1225] handleUserInteraction(): [main] >>> handleUserInteraction START: action=3, redraw=0, wdt_removed=1
+[ 22509][E][main.cpp:1281] handleUserInteraction(): [main] <<< handleUserInteraction END: re-adding wdt=1
+[ 23420][E][M5PaperTouchControls.cpp:23] run(): [M5Touch] Touch detected at x=51, y=684, width=540
+[ 23429][E][M5PaperTouchControls.cpp:27] run(): [M5Touch] Touch zone: LEFT -> UP
+[ 23439][E][main.cpp:1225] handleUserInteraction(): [main] >>> handleUserInteraction START: action=1, redraw=0, wdt_removed=1
+[ 23536][E][main.cpp:1281] handleUserInteraction(): [main] <<< handleUserInteraction END: re-adding wdt=1
+[ 24082][E][M5PaperTouchControls.cpp:23] run(): [M5Touch] Touch detected at x=17, y=671, width=540
+[ 24091][E][M5PaperTouchControls.cpp:27] run(): [M5Touch] Touch zone: LEFT -> UP
+[ 24101][E][main.cpp:1225] handleUserInteraction(): [main] >>> handleUserInteraction START: action=1, redraw=0, wdt_removed=1
+[ 24217][E][main.cpp:1281] handleUserInteraction(): [main] <<< handleUserInteraction END: re-adding wdt=1
+[ 24768][E][M5PaperTouchControls.cpp:23] run(): [M5Touch] Touch detected at x=40, y=672, width=540
+[ 24777][E][M5PaperTouchControls.cpp:27] run(): [M5Touch] Touch zone: LEFT -> UP
+[ 24787][E][main.cpp:1225] handleUserInteraction(): [main] >>> handleUserInteraction START: action=1, redraw=0, wdt_removed=1
+[ 24903][E][main.cpp:1281] handleUserInteraction(): [main] <<< handleUserInteraction END: re-adding wdt=1
+[ 25516][E][M5PaperTouchControls.cpp:23] run(): [M5Touch] Touch detected at x=288, y=725, width=540
+[ 25525][E][M5PaperTouchControls.cpp:37] run(): [M5Touch] Touch zone: CENTER -> SELECT
+[ 25535][E][main.cpp:1225] handleUserInteraction(): [main] >>> handleUserInteraction START: action=3, redraw=0, wdt_removed=1
+[ 25652][E][main.cpp:1281] handleUserInteraction(): [main] <<< handleUserInteraction END: re-adding wdt=1
+[ 26516][E][M5PaperTouchControls.cpp:23] run(): [M5Touch] Touch detected at x=42, y=728, width=540
+[ 26525][E][M5PaperTouchControls.cpp:27] run(): [M5Touch] Touch zone: LEFT -> UP
+[ 26535][E][main.cpp:1225] handleUserInteraction(): [main] >>> handleUserInteraction START: action=1, redraw=0, wdt_removed=1
+[ 26632][E][main.cpp:1281] handleUserInteraction(): [main] <<< handleUserInteraction END: re-adding wdt=1
+[ 27376][E][M5PaperTouchControls.cpp:23] run(): [M5Touch] Touch detected at x=36, y=721, width=540
+[ 27385][E][M5PaperTouchControls.cpp:27] run(): [M5Touch] Touch zone: LEFT -> UP
+[ 27395][E][main.cpp:1225] handleUserInteraction(): [main] >>> handleUserInteraction START: action=1, redraw=0, wdt_removed=1
+[ 27512][E][main.cpp:1281] handleUserInteraction(): [main] <<< handleUserInteraction END: re-adding wdt=1
+[ 28433][E][M5PaperTouchControls.cpp:23] run(): [M5Touch] Touch detected at x=286, y=774, width=540
+[ 28442][E][M5PaperTouchControls.cpp:37] run(): [M5Touch] Touch zone: CENTER -> SELECT
+[ 28452][E][main.cpp:1225] handleUserInteraction(): [main] >>> handleUserInteraction START: action=3, redraw=0, wdt_removed=1
+[ 28665][E][main.cpp:1281] handleUserInteraction(): [main] <<< handleUserInteraction END: re-adding wdt=1
+[101742][E][WebServer.cpp:638] _handleRequest(): request handler not found

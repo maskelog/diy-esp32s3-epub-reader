@@ -308,8 +308,9 @@ bool Epub::load_with_task(size_t stack_size_bytes)
   ctx->done = xSemaphoreCreateBinary();
   if (!ctx->done)
   {
+    ESP_LOGW(TAG, "Failed to create load semaphore, falling back to synchronous load");
     delete ctx;
-    return false;
+    return load_internal();
   }
 
   auto task_fn = [](void *param) {
@@ -323,9 +324,10 @@ bool Epub::load_with_task(size_t stack_size_bytes)
   BaseType_t ok = xTaskCreatePinnedToCore(task_fn, "epub_load", stack_words, ctx, 2, nullptr, 1);
   if (ok != pdPASS)
   {
+    ESP_LOGW(TAG, "Failed to create load task (%lu words), falling back to synchronous load", static_cast<unsigned long>(stack_words));
     vSemaphoreDelete(ctx->done);
     delete ctx;
-    return false;
+    return load_internal();
   }
 
   xSemaphoreTake(ctx->done, portMAX_DELAY);

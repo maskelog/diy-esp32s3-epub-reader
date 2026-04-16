@@ -14,9 +14,15 @@
 class M5GfxRenderer : public Renderer
 {
 private:
+    static constexpr int EFONT_TEXT_SCALE = 2; // efont base glyph is 16px; scale=2 → 32px rendered
+
     LGFX_Sprite *framebuffer;
-    int m_refresh_count = 0;  // Track partial refreshes for periodic full refresh
+    int m_refresh_count = 0;
     bool dither_images = false;
+
+    // Decodes one UTF-8 character from *str (advancing the pointer) and
+    // returns its rendered pixel width.  Defined in M5GfxRenderer.cpp.
+    static const char *decode_efont_char(const char *str, uint16_t *out_utf16, int *out_width);
 
 public:
     M5GfxRenderer();

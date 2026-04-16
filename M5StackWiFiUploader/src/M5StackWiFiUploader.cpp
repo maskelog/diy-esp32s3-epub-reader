@@ -709,7 +709,6 @@ void M5StackWiFiUploader::_handleUploadHTTP() {
 }
 
 void M5StackWiFiUploader::_handleUploadData() {
-    Serial.println("[DEBUG] _handleUploadData called");
     HTTPUpload& upload = _webServer->upload();
     static File uploadFile;
     static String currentFilename;
@@ -718,16 +717,18 @@ void M5StackWiFiUploader::_handleUploadData() {
     static String tempPath;
     static String finalPath;
     static uint32_t last_wdt_kick_ms;
+    static uint32_t last_progress_ms;
+    static uint32_t last_yield_ms;
     static bool upload_ok;
     static String last_error;
-
-    Serial.printf("[DEBUG] upload.status = %d\n", upload.status);
 
     if (upload.status == UPLOAD_FILE_START) {
         currentFilename = upload.filename;
         currentFilesize = 0;
         expectedFilesize = upload.totalSize;
         last_wdt_kick_ms = millis();
+        last_progress_ms = last_wdt_kick_ms;
+        last_yield_ms = last_wdt_kick_ms;
         upload_ok = true;
         last_error = "";
         _lastUploadSuccess = false;
@@ -815,16 +816,19 @@ void M5StackWiFiUploader::_handleUploadData() {
             }
 
             _lastUploadSize = currentFilesize;
-            if (_onUploadProgress) {
-                _onUploadProgress(currentFilename.c_str(), currentFilesize, upload.totalSize);
-            }
             uint32_t now_ms = millis();
+            if (_onUploadProgress && now_ms - last_progress_ms >= 500) {
+                _onUploadProgress(currentFilename.c_str(), currentFilesize, upload.totalSize);
+                last_progress_ms = now_ms;
+            }
             if (now_ms - last_wdt_kick_ms >= 200) {
                 esp_task_wdt_reset();
                 last_wdt_kick_ms = now_ms;
             }
-            delay(1);
-            yield();
+            if (now_ms - last_yield_ms >= 50) {
+                yield();
+                last_yield_ms = now_ms;
+            }
         }
 
     } else if (upload.status == UPLOAD_FILE_END) {

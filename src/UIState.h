@@ -1,0 +1,9 @@
+#pragma once
+
+typedef enum
+{
+  SELECTING_EPUB,
+  SELECTING_TABLE_CONTENTS,
+  READING_EPUB,
+  READING_MENU
+} UIState;

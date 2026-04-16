@@ -99,46 +99,39 @@ void M5GfxRenderer::draw_pixel(int x, int y, uint8_t color)
     }
 }
 
-int M5GfxRenderer::get_text_width(const char *text, bool bold, bool italic)
+// static private helper: decode one UTF-8 char, return advanced pointer + pixel width
+const char *M5GfxRenderer::decode_efont_char(const char *str, uint16_t *out_utf16, int *out_width)
+{
+    str = efontUFT8toUTF16(out_utf16, (char *)str);
+    *out_width = (*out_utf16 < 0x0100) ? (8 * EFONT_TEXT_SCALE) : (16 * EFONT_TEXT_SCALE);
+    return str;
+}
 
+int M5GfxRenderer::get_text_width(const char *text, bool bold, bool italic)
 {
     if (!text)
         return 0;
 
-    // efont를 사용하여 텍스트 폭 계산
     int width = 0;
     const char *str = text;
-    int textsize = 2; // 기본 크기
-
     while (*str != 0x00)
     {
-        if (*str == '\n')
-        {
-            break; // 줄바꿈까지의 폭만 계산
-        }
-
-        uint16_t strUTF16;
-        str = efontUFT8toUTF16(&strUTF16, (char *)str);
-
-        // 문자 폭 계산 (ASCII는 8px, 한글/일본어 등은 16px)
-        int charWidth = (strUTF16 < 0x0100) ? (8 * textsize) : (16 * textsize);
+        if (*str == '\n') break;
+        uint16_t utf16;
+        int charWidth;
+        str = decode_efont_char(str, &utf16, &charWidth);
         width += charWidth;
     }
-
     return width;
 }
 
 void M5GfxRenderer::draw_text(int x, int y, const char *text, bool bold, bool italic)
-
 {
     if (!framebuffer || !text)
         return;
 
-    // efont를 사용하여 텍스트 그리기 (m5book의 printEfontGeneric 방식)
-    // Apply margins from base Renderer class
     int posX = x + margin_left;
     int posY = y + margin_top;
-    int textsize = 2; // 기본 크기
 
     byte font[32];
     const char *str = text;
@@ -147,20 +140,17 @@ void M5GfxRenderer::draw_text(int x, int y, const char *text, bool bold, bool it
     {
         if (*str == '\n')
         {
-            posY += 16 * textsize;
-            posX = x;
+            posY += 16 * EFONT_TEXT_SCALE;
+            posX = x + margin_left;
             str++;
             continue;
         }
 
-        uint16_t strUTF16;
-        str = efontUFT8toUTF16(&strUTF16, (char *)str);
-        getefontData(font, strUTF16);
+        uint16_t utf16;
+        int width;
+        str = decode_efont_char(str, &utf16, &width);
+        getefontData(font, utf16);
 
-        // 문자 폭 계산 (ASCII는 8px, 한글/일본어 등은 16px)
-        int width = (strUTF16 < 0x0100) ? (8 * textsize) : (16 * textsize);
-
-        // 폰트 데이터를 framebuffer에 그리기
         for (uint8_t row = 0; row < 16; row++)
         {
             uint16_t fontdata = font[row * 2] * 256 + font[row * 2 + 1];
@@ -168,20 +158,15 @@ void M5GfxRenderer::draw_text(int x, int y, const char *text, bool bold, bool it
             {
                 if ((0x8000 >> col) & fontdata)
                 {
-                    int drawX = posX + col * textsize;
-                    int drawY = posY + row * textsize;
-                    if (textsize == 1)
-                    {
+                    int drawX = posX + col * EFONT_TEXT_SCALE;
+                    int drawY = posY + row * EFONT_TEXT_SCALE;
+                    if (EFONT_TEXT_SCALE == 1)
                         framebuffer->drawPixel(drawX, drawY, TFT_BLACK);
-                    }
                     else
-                    {
-                        framebuffer->fillRect(drawX, drawY, textsize, textsize, TFT_BLACK);
-                    }
+                        framebuffer->fillRect(drawX, drawY, EFONT_TEXT_SCALE, EFONT_TEXT_SCALE, TFT_BLACK);
                 }
             }
         }
-
         posX += width;
     }
 }
@@ -262,9 +247,8 @@ int M5GfxRenderer::get_page_height()
 
 int M5GfxRenderer::get_line_height()
 {
-    // efont is 16px, with textsize=2 it becomes 32px
-    // Add 4px padding for readability
-    return apply_line_spacing(36); // 32px char height + 4px padding
+    // efont glyph is 16px tall; rendered height = 16 * EFONT_TEXT_SCALE, plus 4px padding.
+    return apply_line_spacing(16 * EFONT_TEXT_SCALE + 4);
 }
 
 void M5GfxRenderer::reset()

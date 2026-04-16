@@ -21,7 +21,7 @@ void M5PaperTouchControls::run()
         int width = M5.Display.width();
         
         ESP_LOGE(TAG, "Touch detected at x=%d, y=%d, width=%d", x, y, width);
-        
+
         if (x < width / 3)
         {
             ESP_LOGE(TAG, "Touch zone: LEFT -> UP");

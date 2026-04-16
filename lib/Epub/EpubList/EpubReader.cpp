@@ -104,6 +104,31 @@ static void render_task(void *param)
 }
 #endif
 
+static RubbishHtmlParser *build_parser_for_section(Epub *epub, int section, bool justified)
+{
+  if (!epub)
+  {
+    return nullptr;
+  }
+
+  std::string item = epub->get_spine_item(section);
+  if (item.empty())
+  {
+    return nullptr;
+  }
+
+  std::string base_path = item.substr(0, item.find_last_of('/') + 1);
+  char *html = reinterpret_cast<char *>(epub->get_item_contents(item));
+  if (!html)
+  {
+    return nullptr;
+  }
+
+  RubbishHtmlParser *built = new RubbishHtmlParser(html, strlen(html), base_path, justified);
+  free(html);
+  return built;
+}
+
 EpubReader::~EpubReader()
 {
   delete parser;
@@ -239,15 +264,43 @@ void EpubReader::parse_and_layout_current_section()
   ctx->done = xSemaphoreCreateBinary();
   if (!ctx->done)
   {
+    ESP_LOGE(TAG, "Failed to create layout semaphore, falling back to synchronous layout");
     delete ctx;
+    parser = build_parser_for_section(epub, state.current_section, use_justified);
+    if (parser)
+    {
+      parser->layout(renderer, epub);
+      parser_section = state.current_section;
+    }
+    state.pages_in_current_section = parser ? parser->get_page_count() : 0;
+#ifndef UNIT_TEST
+    if (was_subscribed)
+    {
+      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+    }
+#endif
     return;
   }
 
   const uint32_t stack_words = static_cast<uint32_t>((96 * 1024) / sizeof(StackType_t));
   if (xTaskCreatePinnedToCore(full_layout_task, "epub_layout", stack_words, ctx, 2, nullptr, 1) != pdPASS)
   {
+    ESP_LOGE(TAG, "Failed to create layout task (%lu words), falling back to synchronous layout", static_cast<unsigned long>(stack_words));
     vSemaphoreDelete(ctx->done);
     delete ctx;
+    parser = build_parser_for_section(epub, state.current_section, use_justified);
+    if (parser)
+    {
+      parser->layout(renderer, epub);
+      parser_section = state.current_section;
+    }
+    state.pages_in_current_section = parser ? parser->get_page_count() : 0;
+#ifndef UNIT_TEST
+    if (was_subscribed)
+    {
+      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+    }
+#endif
     return;
   }
 
@@ -463,15 +516,19 @@ void EpubReader::render()
   ctx->done = xSemaphoreCreateBinary();
   if (!ctx->done)
   {
+    ESP_LOGE(TAG, "Failed to create render semaphore, rendering synchronously");
     delete ctx;
+    parser->render_page(state.current_page, renderer, epub);
   }
   else
   {
     const uint32_t stack_words = static_cast<uint32_t>((64 * 1024) / sizeof(StackType_t));
     if (xTaskCreatePinnedToCore(render_task, "epub_render", stack_words, ctx, 2, nullptr, 1) != pdPASS)
     {
+      ESP_LOGE(TAG, "Failed to create render task (%lu words), rendering synchronously", static_cast<unsigned long>(stack_words));
       vSemaphoreDelete(ctx->done);
       delete ctx;
+      parser->render_page(state.current_page, renderer, epub);
     }
     else
     {
