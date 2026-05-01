@@ -19,6 +19,7 @@ private:
     LGFX_Sprite *framebuffer;
     int m_refresh_count = 0;
     bool dither_images = false;
+    bool m_pending_full_refresh = false;
 
     // Decodes one UTF-8 character from *str (advancing the pointer) and
     // returns its rendered pixel width.  Defined in M5GfxRenderer.cpp.
@@ -47,6 +48,7 @@ public:
     virtual void clear_screen();
     virtual void flush_display();
     void flush_display_full();  // Force full refresh to clear ghosting
+    virtual void request_full_refresh() { m_pending_full_refresh = true; }
 
     virtual int get_page_width();
     virtual int get_page_height();

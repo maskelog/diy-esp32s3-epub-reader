@@ -504,16 +504,27 @@ void M5StackWiFiUploader::_handleRoot() {
                     <div class="progress">
                         <div class="progress-bar" id="${progressId}-bar"></div>
                     </div>
+                    <p id="${progressId}-text" style="font-size:12px;color:#555;margin:4px 0;">0%</p>
                 </div>
             `;
             progressDiv.innerHTML += progressHTML;
 
             const xhr = new XMLHttpRequest();
-            
+            xhr.timeout = 30 * 60 * 1000; // 30 minutes for very large files
+            const startMs = Date.now();
+
             xhr.upload.addEventListener('progress', (e) => {
                 if (e.lengthComputable) {
                     const percentComplete = (e.loaded / e.total) * 100;
                     document.getElementById(progressId + '-bar').style.width = percentComplete + '%';
+                    const elapsed = Math.max(1, (Date.now() - startMs) / 1000);
+                    const speed = e.loaded / elapsed; // bytes/sec
+                    const remaining = speed > 0 ? (e.total - e.loaded) / speed : 0;
+                    const etaStr = formatDuration(remaining);
+                    document.getElementById(progressId + '-text').textContent =
+                        `${percentComplete.toFixed(1)}%  ` +
+                        `${formatFileSize(e.loaded)} / ${formatFileSize(e.total)}  ` +
+                        `${formatFileSize(speed)}/s  ETA ${etaStr}`;
                 }
             });
 
@@ -539,6 +550,16 @@ void M5StackWiFiUploader::_handleRoot() {
             xhr.addEventListener('error', () => {
                 const t = translations[currentLang];
                 showStatus('error', `${file.name} ${t.uploadError}`);
+            });
+
+            xhr.addEventListener('timeout', () => {
+                const t = translations[currentLang];
+                showStatus('error', `${file.name} ${t.uploadError} (timeout)`);
+            });
+
+            xhr.addEventListener('abort', () => {
+                const t = translations[currentLang];
+                showStatus('error', `${file.name} ${t.uploadError} (aborted)`);
             });
 
             xhr.open('POST', '/api/upload');
@@ -632,6 +653,14 @@ void M5StackWiFiUploader::_handleRoot() {
                     showStatus('error', `${filename} ${t.deleteError}`);
                 });
             }
+        }
+
+        function formatDuration(seconds) {
+            if (!isFinite(seconds) || seconds < 0) return '--:--';
+            seconds = Math.round(seconds);
+            const m = Math.floor(seconds / 60);
+            const s = seconds % 60;
+            return m + ':' + String(s).padStart(2, '0');
         }
 
         function formatFileSize(bytes) {

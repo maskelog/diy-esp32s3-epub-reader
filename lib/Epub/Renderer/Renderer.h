@@ -73,6 +73,10 @@ public:
   virtual void clear_screen() = 0;
   virtual void flush_display(){};
   virtual void flush_area(int x, int y, int width, int height){};
+  // Request that the next flush_display() perform a full GC16 refresh
+  // (instead of the fast DU partial update) to clear accumulated ghosting.
+  // Use on major screen transitions (book↔menu, book↔library).
+  virtual void request_full_refresh(){};
 
 #ifdef USE_FREETYPE
   // Optional hooks for FreeType-backed rendering. Default

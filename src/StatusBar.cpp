@@ -24,7 +24,10 @@ void draw_battery_level(Renderer *renderer, float voltage, float percentage)
     if (item.pages_in_current_section > 0)
     {
       char page_str[32];
-      if (item.bookmark_set)
+      bool on_bookmarked_page = item.bookmark_set &&
+                                item.current_section == item.bookmark_section &&
+                                item.current_page    == item.bookmark_page;
+      if (on_bookmarked_page)
       {
         snprintf(page_str, sizeof(page_str), "S%d  %d/%d [B]",
                  item.current_section + 1,

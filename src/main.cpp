@@ -104,10 +104,53 @@ void show_library_loading(Renderer *renderer)
   renderer->flush_display();
 }
 
+// ── last-opened-book persistence ──────────────────────────────────────────
+
+static const char *last_book_path_file = "/Books/last_book.txt";
+
+void save_last_book_path(const char *path)
+{
+  if (!path || !*path) return;
+  // Best-effort: rewrite the small text file with just the EPUB path.
+  if (SD.exists(last_book_path_file)) SD.remove(last_book_path_file);
+  File fp = SD.open(last_book_path_file, FILE_WRITE);
+  if (!fp) return;
+  fp.write((const uint8_t *)path, strlen(path));
+  fp.flush();
+  fp.close();
+}
+
+static int find_last_book_index_by_saved_path()
+{
+  File fp = SD.open(last_book_path_file, FILE_READ);
+  if (!fp) return -1;
+  char buf[MAX_PATH_SIZE] = {0};
+  size_t n = fp.read((uint8_t *)buf, sizeof(buf) - 1);
+  fp.close();
+  if (n == 0) return -1;
+  buf[n] = 0;
+  while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r' ||
+                   buf[n - 1] == ' '  || buf[n - 1] == '\t'))
+  {
+    buf[--n] = 0;
+  }
+  if (n == 0) return -1;
+  for (int i = 0; i < epub_list_state.num_epubs; i++)
+  {
+    if (strcmp(epub_list_state.epub_list[i].path, buf) == 0) return i;
+  }
+  return -1;
+}
+
 // ── find_last_open_book_index ─────────────────────────────────────────────
 
 static int find_last_open_book_index()
 {
+  // Prefer the explicitly-recorded last-opened book — fixes the case where
+  // a freshly-bookmarked book has lower section/page than an older read.
+  int saved = find_last_book_index_by_saved_path();
+  if (saved >= 0) return saved;
+
   int last_index = -1;
   for (int i = 0; i < epub_list_state.num_epubs; i++)
   {
@@ -163,6 +206,7 @@ void handleEpub(Renderer *renderer, UIAction action)
       item.current_section = item.bookmark_section;
       item.current_page    = item.bookmark_page;
     }
+    save_last_book_path(item.path);
     reader = new EpubReader(item, renderer);
     reader->set_justified(justify_paragraphs);
     vTaskDelay(10);

@@ -199,6 +199,20 @@ void M5GfxRenderer::flush_display()
 {
     if (framebuffer)
     {
+        // One-shot GC16 full refresh requested by major screen transition
+        // (e.g. book → reader menu): wipes ghosting carried over from the
+        // previous screen. Without this, DU leaves visible bands like the
+        // book's left text column ghosted into the menu background.
+        if (m_pending_full_refresh)
+        {
+            M5.Display.setEpdMode(epd_mode_t::epd_quality); // GC16
+            framebuffer->pushSprite(0, 0);
+            M5.Display.setEpdMode(epd_mode_t::epd_fast);
+            m_pending_full_refresh = false;
+            m_refresh_count = 0;
+            return;
+        }
+
         m_refresh_count++;
 
         // Periodic ghost-clearing refresh using GL16 (epd_text).

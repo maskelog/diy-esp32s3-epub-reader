@@ -36,6 +36,10 @@ void open_reader_menu(Renderer *renderer, bool advanced)
 {
   reader_menu_advanced = advanced;
   reader_menu_selected = 0;
+  // Major screen change from book → menu: kick a one-shot GC16 to wipe
+  // ghosting from the book content (otherwise the left text column shows
+  // through the menu background as a darker band).
+  if (renderer) renderer->request_full_refresh();
   renderReaderMenu(renderer);
 }
 
@@ -337,6 +341,7 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
           item.bookmark_page    = item.current_page;
           item.bookmark_set     = true;
           if (epub_list) epub_list->save_index(books_index_path);
+          save_last_book_path(item.path);
           show_status_bar_toast(renderer, "Bookmark set");
         }
         ui_state = READING_EPUB;
