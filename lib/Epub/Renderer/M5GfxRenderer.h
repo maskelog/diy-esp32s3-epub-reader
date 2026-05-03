@@ -20,6 +20,9 @@ private:
     int m_refresh_count = 0;
     bool dither_images = false;
     bool m_pending_full_refresh = false;
+    bool m_landscape = false;
+
+    bool create_framebuffer();
 
     // Decodes one UTF-8 character from *str (advancing the pointer) and
     // returns its rendered pixel width.  Defined in M5GfxRenderer.cpp.
@@ -56,6 +59,7 @@ public:
     virtual int get_line_height();
 
     virtual void reset();
+    virtual void set_landscape(bool landscape);
 
     // Use the shared image helpers to enforce 1-bit rendering.
     virtual void draw_image(const std::string &filename, const uint8_t *data, size_t data_size, int x, int y, int width, int height);

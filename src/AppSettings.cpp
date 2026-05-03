@@ -24,6 +24,7 @@ IdleProfile      idle_profile             = IDLE_PROFILE_NORMAL;
 MarginProfile    margin_profile           = MARGIN_PROFILE_NORMAL;
 GestureSensitivity gesture_sensitivity   = GESTURE_SENS_MEDIUM;
 LineSpacingProfile line_spacing_profile  = LINE_SPACING_100;
+bool             landscape_mode           = false;
 int64_t          idle_timeout_reading_us = 20LL * 60 * 1000 * 1000;
 int64_t          idle_timeout_library_us = 5LL  * 60 * 1000 * 1000;
 
@@ -75,6 +76,11 @@ void apply_line_spacing_profile(Renderer *renderer)
   if (line_spacing_profile == LINE_SPACING_120)      spacing_percent = 120;
   else if (line_spacing_profile == LINE_SPACING_140) spacing_percent = 140;
   renderer->set_line_spacing_percent(spacing_percent);
+}
+
+void apply_orientation(Renderer *renderer)
+{
+  if (renderer) renderer->set_landscape(landscape_mode);
 }
 
 // ── Persistent load / save ────────────────────────────────────────────────
@@ -139,10 +145,13 @@ void load_app_settings(Renderer *renderer)
   if (spacing_bits <= LINE_SPACING_140)
     line_spacing_profile = (LineSpacingProfile)spacing_bits;
 
+  landscape_mode = (s.reserved & 0x20) != 0;
+
   apply_idle_profile();
   apply_page_margins(renderer);
   apply_gesture_profile();
   apply_line_spacing_profile(renderer);
+  apply_orientation(renderer);
 #endif // ARDUINO
 }
 
@@ -168,6 +177,7 @@ void save_app_settings(Renderer *renderer)
   s.reserved = (uint8_t)gesture_sensitivity;
   if (justify_paragraphs)  s.reserved |= 0x4;
   s.reserved |= (((uint8_t)line_spacing_profile) & 0x3) << 3;
+  if (landscape_mode)      s.reserved |= 0x20;
 
   File fp = SD.open(app_settings_path, FILE_WRITE);
   if (!fp)

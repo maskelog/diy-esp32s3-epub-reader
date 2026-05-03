@@ -25,9 +25,9 @@ static bool reader_menu_advanced = false;
 
 static const int READER_MENU_BASIC_ITEMS = 7;
 #ifdef BOARD_TYPE_M5_PAPER
-static const int READER_MENU_ADVANCED_ITEMS = 13;
+static const int READER_MENU_ADVANCED_ITEMS = 14;
 #else
-static const int READER_MENU_ADVANCED_ITEMS = 12;
+static const int READER_MENU_ADVANCED_ITEMS = 13;
 #endif
 
 // ── open_reader_menu ──────────────────────────────────────────────────────
@@ -47,13 +47,13 @@ void open_reader_menu(Renderer *renderer, bool advanced)
 
 void renderReaderMenu(Renderer *renderer)
 {
-  const int max_items = 14;
+  const int max_items = 15;
   const char *labels[max_items];
   int items_total = 0;
 
   char buf_status[32], buf_view[32], buf_startup[40], buf_sleep[40];
   char buf_font[32], buf_align[32], buf_tap[32], buf_idle[32];
-  char buf_margin[32], buf_gest[32], buf_spacing[32];
+  char buf_margin[32], buf_gest[32], buf_spacing[32], buf_orient[32];
 #ifdef BOARD_TYPE_M5_PAPER
   char buf_wifi[32];
 #endif
@@ -124,12 +124,15 @@ void renderReaderMenu(Renderer *renderer)
     snprintf(buf_spacing, sizeof(buf_spacing), "Line spacing: %d%%", spacing_percent);
     labels[10] = buf_spacing;
 
+    snprintf(buf_orient, sizeof(buf_orient), "Orientation: %s", landscape_mode ? "Landscape" : "Portrait");
+    labels[11] = buf_orient;
+
 #ifdef BOARD_TYPE_M5_PAPER
     snprintf(buf_wifi, sizeof(buf_wifi), "WiFi upload: %s", wifi_uploader_is_running() ? "ON" : "OFF");
-    labels[11] = buf_wifi;
-    labels[12] = "Save & Back";
+    labels[12] = buf_wifi;
+    labels[13] = "Save & Back";
 #else
-    labels[11] = "Save & Back";
+    labels[12] = "Save & Back";
 #endif
   }
 
@@ -500,8 +503,23 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
         show_status_bar_toast(renderer, toast);
         renderReaderMenu(renderer);
       }
-#ifdef BOARD_TYPE_M5_PAPER
       else if (reader_menu_selected == 11)
+      {
+        landscape_mode = !landscape_mode;
+        apply_orientation(renderer);
+        apply_page_margins(renderer);
+        save_app_settings(renderer);
+        // Force re-layout under the new geometry: drop the reader so the next
+        // render rebuilds pages, and dump cached TOC pagination.
+        if (reader)   { delete reader;   reader   = nullptr; }
+        if (contents) { delete contents; contents = nullptr; }
+        if (epub_list) epub_list->set_needs_redraw();
+        renderer->reset();
+        show_status_bar_toast(renderer, landscape_mode ? "Orientation: Landscape" : "Orientation: Portrait");
+        renderReaderMenu(renderer);
+      }
+#ifdef BOARD_TYPE_M5_PAPER
+      else if (reader_menu_selected == 12)
       {
         if (wifi_uploader_is_running())
           stop_wifi_uploader(renderer, true);
@@ -509,9 +527,9 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
           start_wifi_uploader(renderer);
         renderReaderMenu(renderer);
       }
-      else if (reader_menu_selected == 12)
+      else if (reader_menu_selected == 13)
 #else
-      else if (reader_menu_selected == 11)
+      else if (reader_menu_selected == 12)
 #endif
       {
         // Save & Back

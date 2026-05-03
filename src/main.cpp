@@ -73,6 +73,14 @@ EpubToc    *contents  = nullptr;
 
 bool g_request_sleep_now = false;
 
+// When true, the next sleep will skip the sleep cover image — used by the
+// idle-timeout path so the user wakes to the same page they were reading
+// instead of seeing a cover transition.
+static bool g_idle_sleep_silent = false;
+
+// Microsecond timestamp of the last user action; drives idle-timeout sleep.
+static int64_t g_last_interaction_us = 0;
+
 // ── Hardware handles ──────────────────────────────────────────────────────
 
 Board         *board           = nullptr;
@@ -432,8 +440,29 @@ void setup()
   if (button_controls->did_wake_from_deep_sleep())
   {
     bool hydrate_success = renderer->hydrate();
-    UIAction ui_action   = button_controls->get_deep_sleep_action();
-    handleUserInteraction(renderer, ui_action, !hydrate_success);
+    // Don't consume the wake-button press as an action — the user just
+    // wants to resume from idle sleep, not navigate. The normal-boot
+    // recovery (open_last_book_on_startup) will bring back the last book.
+    if (!hydrate_success)
+    {
+      renderer->reset();
+      show_library_loading(renderer);
+      if (!epub_list)
+      {
+        epub_list = new EpubList(renderer, epub_list_state);
+        epub_list->load("/Books");
+      }
+      if (open_last_book_on_startup)
+      {
+        int last_book_index = find_last_open_book_index();
+        if (last_book_index >= 0)
+        {
+          epub_list_state.selected_item = last_book_index;
+          ui_state = READING_EPUB;
+        }
+      }
+    }
+    handleUserInteraction(renderer, NONE, !hydrate_success);
   }
   else
   {
@@ -463,6 +492,7 @@ void setup()
 
   if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
   set_cpu_reading_idle_mode();
+  g_last_interaction_us = esp_timer_get_time();
   ESP_LOGE(TAG, ">>> Setup complete!");
 }
 
@@ -473,13 +503,17 @@ void loop()
   if (g_request_sleep_now)
   {
     g_request_sleep_now = false;
+    bool silent = g_idle_sleep_silent;
+    g_idle_sleep_silent = false;
 
 #ifdef BOARD_TYPE_M5_PAPER
     if (wifi_uploader_is_running())
       stop_wifi_uploader(renderer, false);
 #endif
 
-    show_sleep_image(renderer);
+    // Idle-timeout sleep keeps the current screen visible (e-ink retains
+    // the image while powered off); only manual sleep shows the cover.
+    if (!silent) show_sleep_image(renderer);
     board->prepare_to_sleep();
     button_controls->setup_deep_sleep();
     esp_deep_sleep_start();
@@ -506,6 +540,27 @@ void loop()
       if (battery) draw_battery_level(renderer, battery->get_voltage(), battery->get_percentage());
       renderer->flush_display();
       set_cpu_reading_idle_mode();
+      g_last_interaction_us = esp_timer_get_time();
+    }
+  }
+
+  // Idle-timeout auto sleep: after no user input for the configured
+  // window (Idle profile setting), deep-sleep silently so the device
+  // stops generating heat. The current page stays on the e-ink panel.
+  bool busy = false;
+#ifdef BOARD_TYPE_M5_PAPER
+  busy = wifi_uploader_is_running();
+#endif
+  if (!busy)
+  {
+    int64_t timeout_us = (ui_state == READING_EPUB)
+                         ? idle_timeout_reading_us
+                         : idle_timeout_library_us;
+    if (timeout_us > 0 &&
+        (esp_timer_get_time() - g_last_interaction_us) > timeout_us)
+    {
+      g_idle_sleep_silent = true;
+      g_request_sleep_now = true;
     }
   }
 }

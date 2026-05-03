@@ -111,6 +111,9 @@ public:
   // really really clear the screen
   virtual void reset(){};
 
+  // Display orientation. Default no-op so non-rotatable boards ignore it.
+  virtual void set_landscape(bool /*landscape*/) {}
+
   // Default operating temperature (deg C) used by epdiy waveform selection on
   // Paper S3. This can be overridden by board-specific code if needed.
   uint8_t temperature = 20;

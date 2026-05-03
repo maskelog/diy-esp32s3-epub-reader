@@ -18,35 +18,7 @@ M5GfxRenderer::M5GfxRenderer()
     framebuffer->setPsram(true);
 #endif
 
-    void *result = framebuffer->createSprite(M5.Display.width(), M5.Display.height());
-
-    if (result == nullptr)
-    {
-        ESP_LOGW("M5GfxRenderer", "Failed to create full-screen framebuffer, trying smaller buffer");
-
-        // 전체 화면 실패 시 더 작은 캔버스 시도 (절반 높이)
-        framebuffer->deleteSprite();
-        result = framebuffer->createSprite(M5.Display.width(), M5.Display.height() / 2);
-
-        if (result == nullptr)
-        {
-            ESP_LOGE("M5GfxRenderer", "Failed to create framebuffer");
-            framebuffer->deleteSprite();
-            delete framebuffer;
-            framebuffer = nullptr;
-            return;
-        }
-        else
-        {
-            ESP_LOGI("M5GfxRenderer", "Framebuffer created (half-screen): %dx%d",
-                     M5.Display.width(), M5.Display.height() / 2);
-        }
-    }
-    else
-    {
-        ESP_LOGI("M5GfxRenderer", "Framebuffer created successfully: %dx%d",
-                 M5.Display.width(), M5.Display.height());
-    }
+    create_framebuffer();
 
     // Set E-Paper mode to fast partial refresh (reduces flickering)
     // epd_fast: partial refresh without full screen flash
@@ -56,6 +28,52 @@ M5GfxRenderer::M5GfxRenderer()
     m_refresh_count = 0;
 
     // efont는 draw_text에서 직접 사용됨
+}
+
+bool M5GfxRenderer::create_framebuffer()
+{
+    if (!framebuffer)
+        return false;
+
+    framebuffer->deleteSprite();
+    int w = M5.Display.width();
+    int h = M5.Display.height();
+    void *result = framebuffer->createSprite(w, h);
+
+    if (result == nullptr)
+    {
+        ESP_LOGW("M5GfxRenderer", "Failed to create full-screen framebuffer, trying half height");
+        framebuffer->deleteSprite();
+        result = framebuffer->createSprite(w, h / 2);
+        if (result == nullptr)
+        {
+            ESP_LOGE("M5GfxRenderer", "Failed to create framebuffer");
+            framebuffer->deleteSprite();
+            return false;
+        }
+        ESP_LOGI("M5GfxRenderer", "Framebuffer created (half-screen): %dx%d", w, h / 2);
+        return true;
+    }
+    ESP_LOGI("M5GfxRenderer", "Framebuffer created: %dx%d", w, h);
+    return true;
+}
+
+void M5GfxRenderer::set_landscape(bool landscape)
+{
+    if (landscape == m_landscape && framebuffer && framebuffer->width() > 0)
+        return;
+    m_landscape = landscape;
+    // M5Paper default rotation is 0 (portrait 540x960). Use rotation 1 for landscape (960x540).
+    M5.Display.setRotation(landscape ? 1 : 0);
+    if (!create_framebuffer())
+    {
+        delete framebuffer;
+        framebuffer = nullptr;
+        return;
+    }
+    M5.Display.setEpdMode(epd_mode_t::epd_fast);
+    m_refresh_count = 0;
+    m_pending_full_refresh = true;
 }
 
 M5GfxRenderer::~M5GfxRenderer()

@@ -65,6 +65,7 @@ extern IdleProfile      idle_profile;
 extern MarginProfile    margin_profile;
 extern GestureSensitivity gesture_sensitivity;
 extern LineSpacingProfile line_spacing_profile;
+extern bool             landscape_mode;
 extern int64_t          idle_timeout_reading_us;
 extern int64_t          idle_timeout_library_us;
 
@@ -77,3 +78,4 @@ void apply_idle_profile();
 void apply_page_margins(Renderer *renderer);
 void apply_gesture_profile();
 void apply_line_spacing_profile(Renderer *renderer);
+void apply_orientation(Renderer *renderer);

@@ -32,6 +32,7 @@ M5Stack M5Paper board:
 - Sleep image: custom sleep image loaded from `/Sleep/bg.png`.
 - Bookmarks: manual bookmark set from the reader menu and restored on reopen.
 - Refresh: reduced full refresh frequency to minimize flash while reading.
+- Orientation: portrait (540×960) / landscape (960×540) toggle from the reader menu, persisted across reboots.
 
 Additional M5Paper specifics in this fork:
 
