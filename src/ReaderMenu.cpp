@@ -9,6 +9,7 @@
 #include "EpubList/EpubList.h"
 #include "EpubList/EpubReader.h"
 #include "EpubList/EpubToc.h"
+#include "EpubList/PaginationBar.h"
 #include <esp_log.h>
 
 #ifdef USE_FREETYPE
@@ -23,12 +24,22 @@ static const char *TAG = "ReaderMenu";
 static int  reader_menu_selected = 0;
 static bool reader_menu_advanced = false;
 
-static const int READER_MENU_BASIC_ITEMS = 7;
+enum BasicMenuItem {
+  BASIC_REFRESH, BASIC_RETURN, BASIC_BOOKMARK, BASIC_TOC,
+  BASIC_LIBRARY, BASIC_MORE, BASIC_SLEEP,
+  BASIC_ITEM_COUNT
+};
+
+enum AdvancedMenuItem {
+  ADV_STATUS_BAR, ADV_LIBRARY_VIEW, ADV_STARTUP, ADV_SLEEP_IMAGE,
+  ADV_FONT_SIZE, ADV_ALIGNMENT, ADV_TAP_ZONES, ADV_IDLE,
+  ADV_MARGINS, ADV_GESTURES, ADV_LINE_SPACING, ADV_ORIENTATION,
 #ifdef BOARD_TYPE_M5_PAPER
-static const int READER_MENU_ADVANCED_ITEMS = 14;
-#else
-static const int READER_MENU_ADVANCED_ITEMS = 13;
+  ADV_WIFI_UPLOAD,
 #endif
+  ADV_SAVE_BACK,
+  ADV_ITEM_COUNT
+};
 
 // ── open_reader_menu ──────────────────────────────────────────────────────
 
@@ -60,34 +71,34 @@ void renderReaderMenu(Renderer *renderer)
 
   if (!reader_menu_advanced)
   {
-    items_total = READER_MENU_BASIC_ITEMS;
-    labels[0] = "[R] Refresh screen";
-    labels[1] = "Return to book";
-    labels[2] = "Bookmark";
-    labels[3] = "Table of contents";
-    labels[4] = "Back to library";
-    labels[5] = "More";
-    labels[6] = "[Zz] Sleep";
+    items_total = BASIC_ITEM_COUNT;
+    labels[BASIC_REFRESH]  = "[R] Refresh screen";
+    labels[BASIC_RETURN]   = "Return to book";
+    labels[BASIC_BOOKMARK] = "Bookmark";
+    labels[BASIC_TOC]      = "Table of contents";
+    labels[BASIC_LIBRARY]  = "Back to library";
+    labels[BASIC_MORE]     = "More";
+    labels[BASIC_SLEEP]    = "[Zz] Sleep";
   }
   else
   {
-    items_total = READER_MENU_ADVANCED_ITEMS;
+    items_total = ADV_ITEM_COUNT;
 
     snprintf(buf_status, sizeof(buf_status), "Status bar: %s", status_bar_visible ? "ON" : "OFF");
-    labels[0] = buf_status;
+    labels[ADV_STATUS_BAR] = buf_status;
 
     snprintf(buf_view, sizeof(buf_view), "Library view: %s", epub_list_state.use_grid_view ? "Grid" : "List");
-    labels[1] = buf_view;
+    labels[ADV_LIBRARY_VIEW] = buf_view;
 
     snprintf(buf_startup, sizeof(buf_startup), "Startup: %s", open_last_book_on_startup ? "Last book" : "Library");
-    labels[2] = buf_startup;
+    labels[ADV_STARTUP] = buf_startup;
 
     const char *sleep_mode_str = "Cover";
     if      (sleep_image_mode == SLEEP_IMAGE_RANDOM) sleep_mode_str = "Random";
     else if (sleep_image_mode == SLEEP_IMAGE_CUSTOM) sleep_mode_str = "Custom";
     else if (sleep_image_mode == SLEEP_IMAGE_OFF)    sleep_mode_str = "Off";
     snprintf(buf_sleep, sizeof(buf_sleep), "Sleep image: %s", sleep_mode_str);
-    labels[3] = buf_sleep;
+    labels[ADV_SLEEP_IMAGE] = buf_sleep;
 
 #ifdef USE_FREETYPE
     int px = renderer->get_reading_font_pixel_height();
@@ -96,44 +107,42 @@ void renderReaderMenu(Renderer *renderer)
 #else
     snprintf(buf_font, sizeof(buf_font), "Font size");
 #endif
-    labels[4] = buf_font;
+    labels[ADV_FONT_SIZE] = buf_font;
 
     snprintf(buf_align, sizeof(buf_align), "Alignment: %s", justify_paragraphs ? "Justified" : "Left");
-    labels[5] = buf_align;
+    labels[ADV_ALIGNMENT] = buf_align;
 
     snprintf(buf_tap, sizeof(buf_tap), "Tap zones: %s", invert_tap_zones ? "Inverted" : "Normal");
-    labels[6] = buf_tap;
+    labels[ADV_TAP_ZONES] = buf_tap;
 
     const char *idle_str = (idle_profile == IDLE_PROFILE_SHORT) ? "Short"
                          : (idle_profile == IDLE_PROFILE_LONG)  ? "Long" : "Normal";
     snprintf(buf_idle, sizeof(buf_idle), "Idle: %s", idle_str);
-    labels[7] = buf_idle;
+    labels[ADV_IDLE] = buf_idle;
 
     const char *margin_str = (margin_profile == MARGIN_PROFILE_NARROW) ? "Narrow"
                            : (margin_profile == MARGIN_PROFILE_WIDE)   ? "Wide" : "Normal";
     snprintf(buf_margin, sizeof(buf_margin), "Margins: %s", margin_str);
-    labels[8] = buf_margin;
+    labels[ADV_MARGINS] = buf_margin;
 
     const char *gest_str = (gesture_sensitivity == GESTURE_SENS_LOW)  ? "Low"
                          : (gesture_sensitivity == GESTURE_SENS_HIGH) ? "High" : "Medium";
     snprintf(buf_gest, sizeof(buf_gest), "Gestures: %s", gest_str);
-    labels[9] = buf_gest;
+    labels[ADV_GESTURES] = buf_gest;
 
     int spacing_percent = (line_spacing_profile == LINE_SPACING_120) ? 120
                         : (line_spacing_profile == LINE_SPACING_140) ? 140 : 100;
     snprintf(buf_spacing, sizeof(buf_spacing), "Line spacing: %d%%", spacing_percent);
-    labels[10] = buf_spacing;
+    labels[ADV_LINE_SPACING] = buf_spacing;
 
     snprintf(buf_orient, sizeof(buf_orient), "Orientation: %s", landscape_mode ? "Landscape" : "Portrait");
-    labels[11] = buf_orient;
+    labels[ADV_ORIENTATION] = buf_orient;
 
 #ifdef BOARD_TYPE_M5_PAPER
     snprintf(buf_wifi, sizeof(buf_wifi), "WiFi upload: %s", wifi_uploader_is_running() ? "ON" : "OFF");
-    labels[12] = buf_wifi;
-    labels[13] = "Save & Back";
-#else
-    labels[12] = "Save & Back";
+    labels[ADV_WIFI_UPLOAD] = buf_wifi;
 #endif
+    labels[ADV_SAVE_BACK] = "Save & Back";
   }
 
 #ifdef USE_FREETYPE
@@ -228,67 +237,8 @@ void renderReaderMenu(Renderer *renderer)
     ypos += button_height + button_spacing;
   }
 
-  // Bottom navigation bar
-  if (bottom_bar_height > 0 && bottom_bar_height <= page_height)
-  {
-    int bar_y = page_height - bottom_bar_height;
-    renderer->fill_rect(0, bar_y, page_width, bottom_bar_height, 255);
-
-    int page_display = current_page + 1;
-    if (page_display < 1)           page_display = 1;
-    if (page_display > total_pages) page_display = total_pages;
-
-    char center[32];
-    snprintf(center, sizeof(center), "%d / %d", page_display, total_pages);
-
-    const char *lbl_ld = "<<", *lbl_ls = "<", *lbl_rs = ">", *lbl_rd = ">>";
-    int w_ld = renderer->get_text_width(lbl_ld, true, false);
-    int w_ls = renderer->get_text_width(lbl_ls, true, false);
-    int w_cn = renderer->get_text_width(center,  false, false);
-    int w_rs = renderer->get_text_width(lbl_rs, true, false);
-    int w_rd = renderer->get_text_width(lbl_rd, true, false);
-    if (w_ld < 0) w_ld = 0;
-    if (w_ls < 0) w_ls = 0;
-    if (w_cn < 0) w_cn = 0;
-    if (w_rs < 0) w_rs = 0;
-    if (w_rd < 0) w_rd = 0;
-
-    int line_h = renderer->get_line_height();
-    if (line_h <= 0) line_h = 20;
-
-    int col_width = page_width / 5;
-    if (col_width <= 0) col_width = 1;
-
-    int z0 = 0,            z1 = col_width,
-        z2 = col_width*2,  z3 = col_width*3,
-        z4 = col_width*4,  z5 = page_width;
-
-    int bar_top = bar_y, bar_bottom = bar_y + bottom_bar_height;
-    int bar_h   = bar_bottom - bar_top;
-    if (bar_h < line_h + 4) bar_h = line_h + 4;
-    int box_y = bar_top + 2;
-    int box_h = bar_h - 4;
-    if (box_h <= 0) box_h = bar_h;
-
-    renderer->draw_rect(z0, box_y, z1-z0, box_h, 0);
-    renderer->draw_rect(z1, box_y, z2-z1, box_h, 0);
-    renderer->draw_rect(z2, box_y, z3-z2, box_h, 0);
-    renderer->draw_rect(z3, box_y, z4-z3, box_h, 0);
-    renderer->draw_rect(z4, box_y, z5-z4, box_h, 0);
-
-    int label_y = bar_top + bar_h/2 - (3*line_h)/4;
-
-    auto center_x = [](int zone_start, int zone_end, int text_width) -> int {
-      int x = zone_start + (zone_end - zone_start - text_width) / 2;
-      return (x < zone_start) ? zone_start : x;
-    };
-
-    renderer->draw_text(center_x(z0,z1,w_ld), label_y, lbl_ld, true,  false);
-    renderer->draw_text(center_x(z1,z2,w_ls), label_y, lbl_ls, true,  false);
-    renderer->draw_text(center_x(z2,z3,w_cn), label_y, center, false, false);
-    renderer->draw_text(center_x(z3,z4,w_rs), label_y, lbl_rs, true,  false);
-    renderer->draw_text(center_x(z4,z5,w_rd), label_y, lbl_rd, true,  false);
-  }
+  // Bottom navigation bar (shared with the epub list and TOC screens)
+  draw_pagination_bar(renderer, current_page, total_pages);
 
 #ifdef USE_FREETYPE
   renderer->set_freetype_enabled(true);
@@ -299,7 +249,7 @@ void renderReaderMenu(Renderer *renderer)
 
 void handleReaderMenu(Renderer *renderer, UIAction action)
 {
-  int item_total = reader_menu_advanced ? READER_MENU_ADVANCED_ITEMS : READER_MENU_BASIC_ITEMS;
+  int item_total = reader_menu_advanced ? (int)ADV_ITEM_COUNT : (int)BASIC_ITEM_COUNT;
 
   switch (action)
   {
@@ -319,22 +269,23 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
     if (!reader_menu_advanced)
     {
       // ── Basic menu ────────────────────────────────────────────────────
-      if (reader_menu_selected == 0)
+      switch (reader_menu_selected)
       {
+      case BASIC_REFRESH:
         // Full screen refresh to mitigate ghosting
         ui_state = READING_EPUB;
         renderer->reset();
         if (reader) reader->render();
-      }
-      else if (reader_menu_selected == 1)
-      {
+        break;
+
+      case BASIC_RETURN:
         // Return to book
         ui_state = READING_EPUB;
         renderer->clear_screen();
         if (reader) reader->render();
-      }
-      else if (reader_menu_selected == 2)
-      {
+        break;
+
+      case BASIC_BOOKMARK:
         // Bookmark
         if (epub_list_state.selected_item >= 0 &&
             epub_list_state.selected_item < epub_list_state.num_epubs)
@@ -350,9 +301,9 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
         ui_state = READING_EPUB;
         renderer->clear_screen();
         if (reader) reader->render();
-      }
-      else if (reader_menu_selected == 3)
-      {
+        break;
+
+      case BASIC_TOC:
         // Table of contents
         ui_state = SELECTING_TABLE_CONTENTS;
         if (contents) { delete contents; contents = nullptr; }
@@ -368,58 +319,63 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
         }
         contents->set_needs_redraw();
         handleEpubTableContents(renderer, NONE, true);
-      }
-      else if (reader_menu_selected == 4)
-      {
+        break;
+
+      case BASIC_LIBRARY:
         // Back to library
         ui_state = SELECTING_EPUB;
         renderer->reset();
         show_library_loading(renderer);
         if (reader) { delete reader; reader = nullptr; }
         handleEpubList(renderer, NONE, true);
-      }
-      else if (reader_menu_selected == 5)
-      {
+        break;
+
+      case BASIC_MORE:
         // More (open advanced settings)
         reader_menu_advanced = true;
         reader_menu_selected = 0;
         renderReaderMenu(renderer);
-      }
-      else if (reader_menu_selected == 6)
-      {
+        break;
+
+      case BASIC_SLEEP:
         // Sleep
         g_request_sleep_now = true;
+        break;
+
+      default:
+        break;
       }
     }
     else
     {
       // ── Advanced menu ─────────────────────────────────────────────────
-      if (reader_menu_selected == 0)
+      switch (reader_menu_selected)
       {
+      case ADV_STATUS_BAR:
         status_bar_visible = !status_bar_visible;
         save_app_settings(renderer);
         show_status_bar_toast(renderer, status_bar_visible ? "Status bar ON" : "Status bar OFF");
         renderReaderMenu(renderer);
-      }
-      else if (reader_menu_selected == 1)
-      {
+        break;
+
+      case ADV_LIBRARY_VIEW:
         epub_list_state.use_grid_view = !epub_list_state.use_grid_view;
         if (epub_list) epub_list->set_needs_redraw();
         save_app_settings(renderer);
         show_status_bar_toast(renderer, epub_list_state.use_grid_view
                                         ? "Library view: Grid" : "Library view: List");
         renderReaderMenu(renderer);
-      }
-      else if (reader_menu_selected == 2)
-      {
+        break;
+
+      case ADV_STARTUP:
         open_last_book_on_startup = !open_last_book_on_startup;
         save_app_settings(renderer);
         show_status_bar_toast(renderer, open_last_book_on_startup
                                         ? "Startup: Open last book" : "Startup: Library");
         renderReaderMenu(renderer);
-      }
-      else if (reader_menu_selected == 3)
-      {
+        break;
+
+      case ADV_SLEEP_IMAGE:
         switch (sleep_image_mode)
         {
         case SLEEP_IMAGE_COVER:  sleep_image_mode = SLEEP_IMAGE_RANDOM; show_status_bar_toast(renderer, "Sleep image: Random"); break;
@@ -430,8 +386,9 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
         }
         save_app_settings(renderer);
         renderReaderMenu(renderer);
-      }
-      else if (reader_menu_selected == 4)
+        break;
+
+      case ADV_FONT_SIZE:
       {
 #ifdef USE_FREETYPE
         int sizes[] = {18, 22, 26};
@@ -445,23 +402,25 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
         (void)renderer;
 #endif
         renderReaderMenu(renderer);
+        break;
       }
-      else if (reader_menu_selected == 5)
-      {
+
+      case ADV_ALIGNMENT:
         justify_paragraphs = !justify_paragraphs;
         save_app_settings(renderer);
         if (reader) reader->set_justified(justify_paragraphs);
         show_status_bar_toast(renderer, justify_paragraphs ? "Alignment: Justified" : "Alignment: Left");
         renderReaderMenu(renderer);
-      }
-      else if (reader_menu_selected == 6)
-      {
+        break;
+
+      case ADV_TAP_ZONES:
         invert_tap_zones = !invert_tap_zones;
         save_app_settings(renderer);
         show_status_bar_toast(renderer, invert_tap_zones ? "Tap zones: inverted" : "Tap zones: normal");
         renderReaderMenu(renderer);
-      }
-      else if (reader_menu_selected == 7)
+        break;
+
+      case ADV_IDLE:
       {
         idle_profile = (IdleProfile)(((int)idle_profile + 1) % 3);
         apply_idle_profile();
@@ -470,8 +429,10 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
                           : (idle_profile == IDLE_PROFILE_LONG)  ? "Idle: Long" : "Idle: Normal";
         show_status_bar_toast(renderer, label);
         renderReaderMenu(renderer);
+        break;
       }
-      else if (reader_menu_selected == 8)
+
+      case ADV_MARGINS:
       {
         margin_profile = (MarginProfile)(((int)margin_profile + 1) % 3);
         apply_page_margins(renderer);
@@ -480,8 +441,10 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
                           : (margin_profile == MARGIN_PROFILE_WIDE)   ? "Margins: Wide" : "Margins: Normal";
         show_status_bar_toast(renderer, label);
         renderReaderMenu(renderer);
+        break;
       }
-      else if (reader_menu_selected == 9)
+
+      case ADV_GESTURES:
       {
         gesture_sensitivity = (GestureSensitivity)(((int)gesture_sensitivity + 1) % 3);
         apply_gesture_profile();
@@ -490,8 +453,10 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
                           : (gesture_sensitivity == GESTURE_SENS_HIGH) ? "Gestures: High" : "Gestures: Medium";
         show_status_bar_toast(renderer, label);
         renderReaderMenu(renderer);
+        break;
       }
-      else if (reader_menu_selected == 10)
+
+      case ADV_LINE_SPACING:
       {
         line_spacing_profile = (LineSpacingProfile)(((int)line_spacing_profile + 1) % 3);
         apply_line_spacing_profile(renderer);
@@ -502,9 +467,10 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
         snprintf(toast, sizeof(toast), "Line spacing: %d%%", pct);
         show_status_bar_toast(renderer, toast);
         renderReaderMenu(renderer);
+        break;
       }
-      else if (reader_menu_selected == 11)
-      {
+
+      case ADV_ORIENTATION:
         landscape_mode = !landscape_mode;
         apply_orientation(renderer);
         apply_page_margins(renderer);
@@ -517,26 +483,28 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
         renderer->reset();
         show_status_bar_toast(renderer, landscape_mode ? "Orientation: Landscape" : "Orientation: Portrait");
         renderReaderMenu(renderer);
-      }
+        break;
+
 #ifdef BOARD_TYPE_M5_PAPER
-      else if (reader_menu_selected == 12)
-      {
+      case ADV_WIFI_UPLOAD:
         if (wifi_uploader_is_running())
           stop_wifi_uploader(renderer, true);
         else
           start_wifi_uploader(renderer);
         renderReaderMenu(renderer);
-      }
-      else if (reader_menu_selected == 13)
-#else
-      else if (reader_menu_selected == 12)
+        break;
 #endif
-      {
+
+      case ADV_SAVE_BACK:
         // Save & Back
         save_app_settings(renderer);
         reader_menu_advanced = false;
         reader_menu_selected = 0;
         renderReaderMenu(renderer);
+        break;
+
+      default:
+        break;
       }
     }
     break;

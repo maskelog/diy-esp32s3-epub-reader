@@ -6,6 +6,8 @@
 #include <SPI.h>
 #include <SD.h>
 #include "../ZipFile/ZipFile.h"
+#include "../TaskWdtGuard.h"
+#include "PaginationBar.h"
 
 #ifndef UNIT_TEST
   #include <freertos/FreeRTOS.h>
@@ -24,6 +26,31 @@ static const char *TAG = "PUBLIST";
 #define PADDING 20
 #define EPUBS_PER_PAGE 5
 static const size_t kMaxCoverBytes = 600 * 1024;
+
+// accepts ".epub" and the 8.3 short-name variant ".epu" (case-insensitive)
+static bool is_epub_filename(const char *name)
+{
+  if (!name)
+  {
+    return false;
+  }
+  const char *dot = strrchr(name, '.');
+  if (!dot || !dot[1])
+  {
+    return false;
+  }
+  const char *ext = dot + 1;
+  size_t len = strlen(ext);
+  if (len != 3 && len != 4)
+  {
+    return false;
+  }
+  if (tolower(ext[0]) != 'e' || tolower(ext[1]) != 'p' || tolower(ext[2]) != 'u')
+  {
+    return false;
+  }
+  return len == 3 || tolower(ext[3]) == 'b';
+}
 
 static bool render_cover_image(Renderer *renderer, const EpubListItem &item, int x, int y, int width, int height)
 {
@@ -203,10 +230,9 @@ bool EpubList::load(const char *path)
     {
       m_title_blocks.resize(state.num_epubs, nullptr);
     }
-#ifndef UNIT_TEST
-    esp_err_t wdt_err = esp_task_wdt_delete(xTaskGetCurrentTaskHandle());
-    bool was_subscribed = (wdt_err == ESP_OK);
-#endif
+    // Suspend watchdog subscription while filling in missing cover paths;
+    // restored automatically when this block exits.
+    TaskWdtGuard wdt_guard;
     bool updated = false;
     for (int i = 0; i < state.num_epubs; ++i)
     {
@@ -232,12 +258,6 @@ bool EpubList::load(const char *path)
     {
       save_index(index_path);
     }
-#ifndef UNIT_TEST
-    if (was_subscribed)
-    {
-      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
-    }
-#endif
     return true;
   }
   else
@@ -247,13 +267,10 @@ bool EpubList::load(const char *path)
     SD.remove(index_path);
   }
   
-#ifndef UNIT_TEST
-  // Remove from watchdog for entire load process (can take many seconds)
-  esp_err_t wdt_err = esp_task_wdt_delete(xTaskGetCurrentTaskHandle());
-  bool was_subscribed = (wdt_err == ESP_OK);
-  ESP_LOGI(TAG, "Watchdog disabled for library load");
-#endif
-  
+  // Suspend watchdog subscription for the entire load process (can take many
+  // seconds); restored automatically on every return path.
+  TaskWdtGuard wdt_guard;
+
   renderer->show_busy();
   vTaskDelay(50); // Allow display update
   // trigger a proper redraw
@@ -280,20 +297,7 @@ bool EpubList::load(const char *path)
       continue;
     }
 
-    const char *dot = strrchr(file.name(), '.');
-      if (!dot || !dot[1])
-      {
-        continue;
-      }
-      const char *ext = dot + 1;
-      // Accept "epub" and also the 8.3 short-name variant "epu" (case-insensitive)
-      char e0 = tolower(ext[0]);
-      char e1 = tolower(ext[1]);
-      char e2 = tolower(ext[2]);
-      char e3 = tolower(ext[3]);
-      bool is_epu = (e0 == 'e' && e1 == 'p' && e2 == 'u' && (ext[3] == '\0'));
-      bool is_epub = (e0 == 'e' && e1 == 'p' && e2 == 'u' && e3 == 'b' && ext[4] == '\0');
-      if (!is_epu && !is_epub)
+    if (!is_epub_filename(file.name()))
       {
         continue;
       }
@@ -353,32 +357,13 @@ bool EpubList::load(const char *path)
   }
   ESP_LOGI(TAG, "Loaded %d EPUBs from %s", state.num_epubs, path);
   state.is_loaded = true;
-  // prepare title layout cache
-  // ensure the title blocks vector has an entry for each epub; layout will
-  // be performed lazily on first render for each item.
-  // (We avoid storing pointers in RTC state; this cache is per-session only.)
-  // Note: MAX_EPUB_LIST_SIZE is small (20), so this is safe.
-  extern EpubListState epub_list_state; // declaration elsewhere; we use state directly here
-  (void)epub_list_state;
-  // ensure capacity but leave pointers null for lazy init
-  // m_title_blocks is a member of EpubList; here we just size it
-  // to match the number of epubs.
-  // Any existing blocks (if reload ever happens) are left as-is for indices < num_epubs.
+  // size the per-session title layout cache; blocks are laid out lazily on first render
   if (m_title_blocks.size() < static_cast<size_t>(state.num_epubs))
   {
     m_title_blocks.resize(state.num_epubs, nullptr);
   }
   save_index(index_path);
-  
-#ifndef UNIT_TEST
-  // Re-add to watchdog after load completes
-  if (was_subscribed)
-  {
-    esp_task_wdt_add(xTaskGetCurrentTaskHandle());
-    ESP_LOGI(TAG, "Watchdog re-enabled after library load");
-  }
-#endif
-  
+
   return true;
 }
 
@@ -386,19 +371,14 @@ void EpubList::render()
 {
   ESP_LOGE(TAG, ">>> EpubList::render() START, num_epubs=%d, selected=%d", state.num_epubs, state.selected_item);
   
-#ifndef UNIT_TEST
-  // Remove from watchdog during render (image loading can be slow)
-  esp_err_t wdt_err = esp_task_wdt_delete(xTaskGetCurrentTaskHandle());
-  bool was_subscribed = (wdt_err == ESP_OK);
-#endif
-  
+  // Suspend watchdog subscription during render (image loading can be slow);
+  // restored automatically on every return path.
+  TaskWdtGuard wdt_guard;
+
   int page_width = renderer->get_page_width();
   int page_height = renderer->get_page_height();
   if (page_width <= 0 || page_height <= 0)
   {
-#ifndef UNIT_TEST
-    if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
-#endif
     return;
   }
 
@@ -442,327 +422,189 @@ void EpubList::render()
 
   if (state.use_grid_view)
   {
-    int cell_width = page_width / EPUB_GRID_COLUMNS;
-    int cell_height = content_height / EPUB_GRID_ROWS;
-    ESP_LOGI(TAG, "Grid cell size is %dx%d, rendering page %d (items %d-%d)",
-             cell_width, cell_height, current_page, start_index,
-             std::min(start_index + items_per_page - 1, state.num_epubs - 1));
-
-    // Yield before starting to render grid
-    vTaskDelay(20);
-
-    for (int i = start_index; i < start_index + items_per_page && i < state.num_epubs; i++)
-    {
-      int index_in_page = i - start_index;
-      int row = index_in_page / EPUB_GRID_COLUMNS;
-      int col = index_in_page % EPUB_GRID_COLUMNS;
-      int cell_x = col * cell_width;
-      int cell_y = row * cell_height;
-
-      // do we need to draw a new page of items?
-      if (current_page != state.previous_rendered_page)
-      {
-        ESP_LOGE(TAG, "Grid: Rendering item %d/%d: %s", i + 1, state.num_epubs, state.epub_list[i].title);
-
-        // Yield before loading each EPUB's cover to prevent watchdog timeout
-        vTaskDelay(50);
-
-        int available_height = cell_height - PADDING * 2;
-        if (available_height < 1)
-        {
-          available_height = 1;
-        }
-        int image_height = available_height;
-        int image_width = 2 * image_height / 3;
-        if (image_width > cell_width - PADDING * 2)
-        {
-          image_width = cell_width - PADDING * 2;
-        }
-        int image_xpos = cell_x + (cell_width - image_width) / 2;
-        int image_ypos = cell_y + (cell_height - image_height) / 2;
-
-        bool drew_cover = render_cover_image(renderer, state.epub_list[i], image_xpos, image_ypos, image_width, image_height);
-        if (!drew_cover)
-        {
-          draw_cover_dots(renderer, state.epub_list[i].title, image_xpos, image_ypos, image_width, image_height);
-        }
-
-        // Yield after rendering each item
-        vTaskDelay(10);
-
-        ESP_LOGI(TAG, "  Item %d rendered", i + 1);
-      }
-
-      int sel_x = cell_x + 2;
-      int sel_y = cell_y + 2;
-      int sel_w = cell_width - 4;
-      int sel_h = cell_height - 4;
-      if (sel_w < 0)
-      {
-        sel_w = 0;
-      }
-      if (sel_h < 0)
-      {
-        sel_h = 0;
-      }
-
-      if (state.previous_selected_item == i)
-      {
-        for (int line = 0; line < 3; line++)
-        {
-          renderer->draw_rect(sel_x + line, sel_y + line, sel_w - 2 * line, sel_h - 2 * line, 255);
-        }
-      }
-      if (state.selected_item == i)
-      {
-        for (int line = 0; line < 3; line++)
-        {
-          renderer->draw_rect(sel_x + line, sel_y + line, sel_w - 2 * line, sel_h - 2 * line, 0);
-        }
-      }
-    }
+    render_grid_page(start_index, items_per_page, current_page, content_height, page_width);
   }
   else
   {
-    int cell_height = content_height / EPUB_LIST_ITEMS_PER_PAGE;
-    ESP_LOGI(TAG, "List cell height is %d, rendering page %d (items %d-%d)",
-             cell_height, current_page, start_index,
-             std::min(start_index + EPUB_LIST_ITEMS_PER_PAGE - 1, state.num_epubs - 1));
-
-    // Yield before starting to render list
-    vTaskDelay(20);
-
-    int ypos = 0;
-    for (int i = start_index; i < start_index + EPUB_LIST_ITEMS_PER_PAGE && i < state.num_epubs; i++)
-    {
-      // do we need to draw a new page of items?
-      if (current_page != state.previous_rendered_page)
-      {
-        ESP_LOGE(TAG, "List: Rendering item %d/%d: %s", i + 1, state.num_epubs, state.epub_list[i].title);
-
-        // Yield before loading each EPUB's cover to prevent watchdog timeout
-        vTaskDelay(50);
-
-        // draw the cover page area (now just title card)
-        int image_xpos = PADDING;
-        int image_ypos = ypos + PADDING;
-        int image_height = cell_height - PADDING * 2;
-        int image_width = 2 * image_height / 3;
-
-        bool drew_cover = render_cover_image(renderer, state.epub_list[i], image_xpos, image_ypos, image_width, image_height);
-        if (!drew_cover)
-        {
-          draw_cover_dots(renderer, state.epub_list[i].title, image_xpos, image_ypos, image_width, image_height);
-        }
-        // draw the title
-        int text_xpos = image_xpos + image_width + PADDING;
-        int text_ypos = ypos + PADDING / 2;
-        int text_width = page_width - (text_xpos + PADDING);
-        int text_height = cell_height - PADDING * 2;
-        // use the text block to layout the title
-        TextBlock *title_block = m_title_blocks[i];
-        if (!title_block)
-        {
-          title_block = new TextBlock(LEFT_ALIGN);
-          // Render library titles in bold in the list view.
-          title_block->add_span(state.epub_list[i].title, true, false);
-          title_block->layout(renderer, nullptr, text_width);
-          m_title_blocks[i] = title_block;
-        }
-        // work out the height of the title
-        int title_height = title_block->line_breaks.size() * renderer->get_line_height();
-        // center the title in the cell
-        int y_offset = title_height < text_height ? (text_height - title_height) / 2 : 0;
-        // draw each line of the title making sure we don't run over the cell
-        for (int li = 0; li < title_block->line_breaks.size() && y_offset + renderer->get_line_height() < text_height; li++)
-        {
-          title_block->render(renderer, li, text_xpos, text_ypos + y_offset);
-          y_offset += renderer->get_line_height();
-        }
-        // Yield between list items to keep the watchdog happy when
-        // rendering many large covers and titles.
-        vTaskDelay(1);
-      }
-      // clear the selection box around the previous selected item
-      if (state.previous_selected_item == i)
-      {
-        for (int line = 0; line < 5; line++)
-        {
-          renderer->draw_rect(line, ypos + PADDING / 2 + line, page_width - 2 * line, cell_height - PADDING - 2 * line, 255);
-        }
-      }
-      // draw the selection box around the current selection
-      if (state.selected_item == i)
-      {
-        for (int line = 0; line < 5; line++)
-        {
-          renderer->draw_rect(line, ypos + PADDING / 2 + line, page_width - 2 * line, cell_height - PADDING - 2 * line, 0);
-        }
-      }
-      ypos += cell_height;
-    }
+    render_list_page(start_index, current_page, content_height, page_width);
   }
 
   // draw bottom navigation / toggle bar
-  if (bottom_bar_height > 0 && bottom_bar_height <= page_height)
+  int total_pages = 1;
+  if (state.num_epubs > 0 && items_per_page > 0)
   {
-    int bar_y = page_height - bottom_bar_height;
-    renderer->fill_rect(0, bar_y, page_width, bottom_bar_height, 255);
-    int center_x = page_width / 2;
-    int center_y = bar_y + bottom_bar_height / 2;
-
-    int total_pages = 1;
-    if (state.num_epubs > 0 && items_per_page > 0)
-    {
-      total_pages = (state.num_epubs + items_per_page - 1) / items_per_page;
-    }
-    if (total_pages < 1)
-    {
-      total_pages = 1;
-    }
-    int page_display = current_page + 1;
-    if (page_display < 1)
-    {
-      page_display = 1;
-    }
-    if (page_display > total_pages)
-    {
-      page_display = total_pages;
-    }
-
-    // Layout "<<      <      Page X of Y      >      >>" so that the
-    // arrow groups are bold with ~50% more spacing between single and
-    // double arrows, while the "Page X of Y" text remains normal.
-    const char *left_double = "<<";
-    const char *left_single = "<";
-    const char *right_single = ">";
-    const char *right_double = ">>";
-
-    char center[32];
-    snprintf(center, sizeof(center), "%d / %d", page_display, total_pages);
-
-    int w_ld = renderer->get_text_width(left_double, true, false);
-    int w_ls = renderer->get_text_width(left_single, true, false);
-    int w_center = renderer->get_text_width(center, false, false);
-    int w_rs = renderer->get_text_width(right_single, true, false);
-    int w_rd = renderer->get_text_width(right_double, true, false);
-    if (w_ld < 0) w_ld = 0;
-    if (w_ls < 0) w_ls = 0;
-    if (w_center < 0) w_center = 0;
-    if (w_rs < 0) w_rs = 0;
-    if (w_rd < 0) w_rd = 0;
-
-    int space_w = renderer->get_space_width();
-    if (space_w < 0)
-    {
-      space_w = 0;
-    }
-    // Use 6 spaces (~50% more than the previous 4-space gaps).
-    int gap_arrows = space_w * 6;
-    int gap_center = space_w * 6;
-
-    // Divide the full page width into five equal navigation regions
-    // that span the entire bottom bar: [<<] [<] [X / Y] [>] [>>]. Place
-    // the text baseline slightly below geometric center to account for
-    // how epdiy bitmap glyphs sit relative to the baseline.
-    int line_h = renderer->get_line_height();
-    if (line_h <= 0)
-    {
-      line_h = 20;
-    }
-    int label_y = center_y - (3 * line_h) / 4;
-
-    int columns = 5;
-    int col_width = page_width / columns;
-    if (col_width <= 0)
-    {
-      col_width = 1;
-    }
-
-    int ld_zone_start = 0;
-    int ld_zone_end = ld_zone_start + col_width;
-
-    int ls_zone_start = ld_zone_end;
-    int ls_zone_end = ls_zone_start + col_width;
-
-    int center_zone_start = ls_zone_end;
-    int center_zone_end = center_zone_start + col_width;
-
-    int rs_zone_start = center_zone_end;
-    int rs_zone_end = rs_zone_start + col_width;
-
-    int rd_zone_start = rs_zone_end;
-    int rd_zone_end = page_width; // consume any remainder to reach the edge
-
-    int bar_top = bar_y;
-    int bar_bottom = bar_y + bottom_bar_height;
-    int bar_height = bar_bottom - bar_top;
-    if (bar_height < renderer->get_line_height() + 4)
-    {
-      bar_height = renderer->get_line_height() + 4;
-    }
-
-    auto draw_nav_box = [&](int x0, int x1) {
-      if (x1 <= x0)
-      {
-        return;
-      }
-      int box_x = x0;
-      int box_w = x1 - x0;
-      int box_y = bar_top + 2;
-      int box_h = bar_height - 4;
-      if (box_h <= 0)
-      {
-        box_h = bar_height;
-      }
-      renderer->draw_rect(box_x, box_y, box_w, box_h, 0);
-    };
-
-    // Outline each interactive region so the user can see the
-    // navigation buttons that correspond to the touch zones.
-    draw_nav_box(ld_zone_start, ld_zone_end);
-    draw_nav_box(ls_zone_start, ls_zone_end);
-    draw_nav_box(center_zone_start, center_zone_end);
-    draw_nav_box(rs_zone_start, rs_zone_end);
-    draw_nav_box(rd_zone_start, rd_zone_end);
-
-    // Center each label within its corresponding region.
-    auto center_label_x = [](int zone_start, int zone_end, int text_width) {
-      int w = zone_end - zone_start;
-      int x = zone_start + (w - text_width) / 2;
-      if (x < zone_start)
-      {
-        x = zone_start;
-      }
-      return x;
-    };
-
-    int x_ld = center_label_x(ld_zone_start, ld_zone_end, w_ld);
-    int x_ls = center_label_x(ls_zone_start, ls_zone_end, w_ls);
-    int x_center = center_label_x(center_zone_start, center_zone_end, w_center);
-    int x_rs = center_label_x(rs_zone_start, rs_zone_end, w_rs);
-    int x_rd = center_label_x(rd_zone_start, rd_zone_end, w_rd);
-
-    // Draw each segment: bold arrows, normal "Page X of Y".
-    renderer->draw_text(x_ld, label_y, left_double, true, false);
-    renderer->draw_text(x_ls, label_y, left_single, true, false);
-    renderer->draw_text(x_center, label_y, center, false, false);
-    renderer->draw_text(x_rs, label_y, right_single, true, false);
-    renderer->draw_text(x_rd, label_y, right_double, true, false);
+    total_pages = (state.num_epubs + items_per_page - 1) / items_per_page;
   }
+  draw_pagination_bar(renderer, current_page, total_pages);
 
   state.previous_selected_item = state.selected_item;
   state.previous_rendered_page = current_page;
 
   ESP_LOGE(TAG, "<<< EpubList::render() END, page=%d", current_page);
-  
-#ifndef UNIT_TEST
-  // Re-add to watchdog after render completes
-  if (was_subscribed)
+}
+
+void EpubList::render_grid_page(int start_index, int items_per_page, int current_page, int content_height, int page_width)
+{
+  int cell_width = page_width / EPUB_GRID_COLUMNS;
+  int cell_height = content_height / EPUB_GRID_ROWS;
+  ESP_LOGI(TAG, "Grid cell size is %dx%d, rendering page %d (items %d-%d)",
+           cell_width, cell_height, current_page, start_index,
+           std::min(start_index + items_per_page - 1, state.num_epubs - 1));
+
+  // Yield before starting to render grid
+  vTaskDelay(20);
+
+  for (int i = start_index; i < start_index + items_per_page && i < state.num_epubs; i++)
   {
-    esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+    int index_in_page = i - start_index;
+    int row = index_in_page / EPUB_GRID_COLUMNS;
+    int col = index_in_page % EPUB_GRID_COLUMNS;
+    int cell_x = col * cell_width;
+    int cell_y = row * cell_height;
+
+    // do we need to draw a new page of items?
+    if (current_page != state.previous_rendered_page)
+    {
+      ESP_LOGE(TAG, "Grid: Rendering item %d/%d: %s", i + 1, state.num_epubs, state.epub_list[i].title);
+
+      // Yield before loading each EPUB's cover to prevent watchdog timeout
+      vTaskDelay(50);
+
+      int available_height = cell_height - PADDING * 2;
+      if (available_height < 1)
+      {
+        available_height = 1;
+      }
+      int image_height = available_height;
+      int image_width = 2 * image_height / 3;
+      if (image_width > cell_width - PADDING * 2)
+      {
+        image_width = cell_width - PADDING * 2;
+      }
+      int image_xpos = cell_x + (cell_width - image_width) / 2;
+      int image_ypos = cell_y + (cell_height - image_height) / 2;
+
+      bool drew_cover = render_cover_image(renderer, state.epub_list[i], image_xpos, image_ypos, image_width, image_height);
+      if (!drew_cover)
+      {
+        draw_cover_dots(renderer, state.epub_list[i].title, image_xpos, image_ypos, image_width, image_height);
+      }
+
+      // Yield after rendering each item
+      vTaskDelay(10);
+
+      ESP_LOGI(TAG, "  Item %d rendered", i + 1);
+    }
+
+    int sel_x = cell_x + 2;
+    int sel_y = cell_y + 2;
+    int sel_w = cell_width - 4;
+    int sel_h = cell_height - 4;
+    if (sel_w < 0)
+    {
+      sel_w = 0;
+    }
+    if (sel_h < 0)
+    {
+      sel_h = 0;
+    }
+
+    if (state.previous_selected_item == i)
+    {
+      for (int line = 0; line < 3; line++)
+      {
+        renderer->draw_rect(sel_x + line, sel_y + line, sel_w - 2 * line, sel_h - 2 * line, 255);
+      }
+    }
+    if (state.selected_item == i)
+    {
+      for (int line = 0; line < 3; line++)
+      {
+        renderer->draw_rect(sel_x + line, sel_y + line, sel_w - 2 * line, sel_h - 2 * line, 0);
+      }
+    }
   }
-#endif
+}
+
+void EpubList::render_list_page(int start_index, int current_page, int content_height, int page_width)
+{
+  int cell_height = content_height / EPUB_LIST_ITEMS_PER_PAGE;
+  ESP_LOGI(TAG, "List cell height is %d, rendering page %d (items %d-%d)",
+           cell_height, current_page, start_index,
+           std::min(start_index + EPUB_LIST_ITEMS_PER_PAGE - 1, state.num_epubs - 1));
+
+  // Yield before starting to render list
+  vTaskDelay(20);
+
+  int ypos = 0;
+  for (int i = start_index; i < start_index + EPUB_LIST_ITEMS_PER_PAGE && i < state.num_epubs; i++)
+  {
+    // do we need to draw a new page of items?
+    if (current_page != state.previous_rendered_page)
+    {
+      ESP_LOGE(TAG, "List: Rendering item %d/%d: %s", i + 1, state.num_epubs, state.epub_list[i].title);
+
+      // Yield before loading each EPUB's cover to prevent watchdog timeout
+      vTaskDelay(50);
+
+      // draw the cover page area (now just title card)
+      int image_xpos = PADDING;
+      int image_ypos = ypos + PADDING;
+      int image_height = cell_height - PADDING * 2;
+      int image_width = 2 * image_height / 3;
+
+      bool drew_cover = render_cover_image(renderer, state.epub_list[i], image_xpos, image_ypos, image_width, image_height);
+      if (!drew_cover)
+      {
+        draw_cover_dots(renderer, state.epub_list[i].title, image_xpos, image_ypos, image_width, image_height);
+      }
+      // draw the title
+      int text_xpos = image_xpos + image_width + PADDING;
+      int text_ypos = ypos + PADDING / 2;
+      int text_width = page_width - (text_xpos + PADDING);
+      int text_height = cell_height - PADDING * 2;
+      // use the text block to layout the title
+      TextBlock *title_block = m_title_blocks[i];
+      if (!title_block)
+      {
+        title_block = new TextBlock(LEFT_ALIGN);
+        // Render library titles in bold in the list view.
+        title_block->add_span(state.epub_list[i].title, true, false);
+        title_block->layout(renderer, nullptr, text_width);
+        m_title_blocks[i] = title_block;
+      }
+      // work out the height of the title
+      int title_height = title_block->line_breaks.size() * renderer->get_line_height();
+      // center the title in the cell
+      int y_offset = title_height < text_height ? (text_height - title_height) / 2 : 0;
+      // draw each line of the title making sure we don't run over the cell
+      for (int li = 0; li < title_block->line_breaks.size() && y_offset + renderer->get_line_height() < text_height; li++)
+      {
+        title_block->render(renderer, li, text_xpos, text_ypos + y_offset);
+        y_offset += renderer->get_line_height();
+      }
+      // Yield between list items to keep the watchdog happy when
+      // rendering many large covers and titles.
+      vTaskDelay(1);
+    }
+    // clear the selection box around the previous selected item
+    if (state.previous_selected_item == i)
+    {
+      for (int line = 0; line < 5; line++)
+      {
+        renderer->draw_rect(line, ypos + PADDING / 2 + line, page_width - 2 * line, cell_height - PADDING - 2 * line, 255);
+      }
+    }
+    // draw the selection box around the current selection
+    if (state.selected_item == i)
+    {
+      for (int line = 0; line < 5; line++)
+      {
+        renderer->draw_rect(line, ypos + PADDING / 2 + line, page_width - 2 * line, cell_height - PADDING - 2 * line, 0);
+      }
+    }
+    ypos += cell_height;
+  }
 }
 
 // Binary index format:
@@ -860,20 +702,7 @@ bool EpubList::load_index(const char *books_path, const char *index_path)
         f.close();
         continue;
       }
-      const char *dot = strrchr(name, '.');
-      if (!dot || !dot[1])
-      {
-        f.close();
-        continue;
-      }
-      const char *ext = dot + 1;
-      char e0 = tolower(ext[0]);
-      char e1 = tolower(ext[1]);
-      char e2 = tolower(ext[2]);
-      char e3 = tolower(ext[3]);
-      bool is_epu = (e0 == 'e' && e1 == 'p' && e2 == 'u' && (ext[3] == '\0'));
-      bool is_epub = (e0 == 'e' && e1 == 'p' && e2 == 'u' && e3 == 'b' && ext[4] == '\0');
-      if (is_epu || is_epub)
+      if (is_epub_filename(name))
       {
         dir_count++;
       }

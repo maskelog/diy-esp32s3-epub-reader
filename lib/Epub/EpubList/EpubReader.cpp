@@ -9,11 +9,11 @@
 #else
 #define ESP_LOGI(args...)
 #define ESP_LOGE(args...)
-#define ESP_LOGI(args...)
 #define ESP_LOGD(args...)
 #endif
 #include "EpubReader.h"
 #include "Epub.h"
+#include "../TaskWdtGuard.h"
 #include "../RubbishHtmlParser/RubbishHtmlParser.h"
 #include "../Renderer/Renderer.h"
 
@@ -141,12 +141,9 @@ bool EpubReader::load()
   ESP_LOGE(TAG, ">>> EpubReader::load() START");
   ESP_LOGD(TAG, "Before epub load: %d", esp_get_free_heap_size());
 
-#ifndef UNIT_TEST
-  // Remove from watchdog during load (can take several seconds)
-  esp_err_t wdt_err = esp_task_wdt_delete(xTaskGetCurrentTaskHandle());
-  bool was_subscribed = (wdt_err == ESP_OK);
-  ESP_LOGI(TAG, "Watchdog disabled for EPUB load");
-#endif
+  // Suspend watchdog subscription during load (can take several seconds);
+  // restored automatically on every return path.
+  TaskWdtGuard wdt_guard;
 
   vTaskDelay(10);
 
@@ -167,9 +164,6 @@ bool EpubReader::load()
     if (state.path[0] == '\0')
     {
       ESP_LOGE(TAG, "EpubReader::load called with empty path");
-#ifndef UNIT_TEST
-      if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
-#endif
       return false;
     }
 
@@ -185,9 +179,6 @@ bool EpubReader::load()
       ESP_LOGE(TAG, "Failed to load epub '%s'", state.path);
       delete epub;
       epub = nullptr;
-#ifndef UNIT_TEST
-      if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
-#endif
       return false;
     }
 
@@ -196,16 +187,7 @@ bool EpubReader::load()
     ESP_LOGI(TAG, "EPUB loaded successfully");
     ESP_LOGD(TAG, "After epub load: %d", esp_get_free_heap_size());
   }
-  
-#ifndef UNIT_TEST
-  // Re-add to watchdog
-  if (was_subscribed)
-  {
-    esp_task_wdt_add(xTaskGetCurrentTaskHandle());
-    ESP_LOGI(TAG, "Watchdog re-enabled after EPUB load");
-  }
-#endif
-  
+
   return true;
 }
 
@@ -236,12 +218,9 @@ void EpubReader::parse_and_layout_current_section()
     return;
   }
 
-#ifndef UNIT_TEST
-  // Remove from watchdog during layout (can take many seconds with images)
-  esp_err_t wdt_err = esp_task_wdt_delete(xTaskGetCurrentTaskHandle());
-  bool was_subscribed = (wdt_err == ESP_OK);
-  ESP_LOGI(TAG, "Watchdog disabled for section layout");
-#endif
+  // Suspend watchdog subscription during layout (can take many seconds with
+  // images); restored automatically on every return path.
+  TaskWdtGuard wdt_guard;
 
   renderer->show_busy();
   vTaskDelay(50); // Allow display update
@@ -273,12 +252,6 @@ void EpubReader::parse_and_layout_current_section()
       parser_section = state.current_section;
     }
     state.pages_in_current_section = parser ? parser->get_page_count() : 0;
-#ifndef UNIT_TEST
-    if (was_subscribed)
-    {
-      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
-    }
-#endif
     return;
   }
 
@@ -295,12 +268,6 @@ void EpubReader::parse_and_layout_current_section()
       parser_section = state.current_section;
     }
     state.pages_in_current_section = parser ? parser->get_page_count() : 0;
-#ifndef UNIT_TEST
-    if (was_subscribed)
-    {
-      esp_task_wdt_add(xTaskGetCurrentTaskHandle());
-    }
-#endif
     return;
   }
 
@@ -347,14 +314,6 @@ void EpubReader::parse_and_layout_current_section()
   ESP_LOGD(TAG, "After layout: %d", esp_get_free_heap_size());
   state.pages_in_current_section = parser->get_page_count();
   
-#ifndef UNIT_TEST
-  // Re-add to watchdog after layout completes
-  if (was_subscribed)
-  {
-    esp_task_wdt_add(xTaskGetCurrentTaskHandle());
-    ESP_LOGI(TAG, "Watchdog re-enabled after section layout");
-  }
-#endif
 }
 
 void EpubReader::prefetch_next_section()
@@ -479,11 +438,9 @@ void EpubReader::render()
 {
   ESP_LOGE(TAG, ">>> EpubReader::render() START");
 
-#ifndef UNIT_TEST
-  // Remove from watchdog during render (image rendering can be slow)
-  esp_err_t wdt_err = esp_task_wdt_delete(xTaskGetCurrentTaskHandle());
-  bool was_subscribed = (wdt_err == ESP_OK);
-#endif
+  // Suspend watchdog subscription during render (image rendering can be
+  // slow); restored automatically on every return path.
+  TaskWdtGuard wdt_guard;
 
   vTaskDelay(10);
 
@@ -496,9 +453,6 @@ void EpubReader::render()
   if (!parser)
   {
     ESP_LOGE(TAG, "EpubReader::render called with null parser after layout; aborting render");
-#ifndef UNIT_TEST
-    if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
-#endif
     return;
   }
 
@@ -546,13 +500,6 @@ void EpubReader::render()
   ESP_LOGI(TAG, "Page %d rendered", state.current_page);
   ESP_LOGD(TAG, "after render: %d", esp_get_free_heap_size());
   
-#ifndef UNIT_TEST
-  // Re-add to watchdog after render completes
-  if (was_subscribed)
-  {
-    esp_task_wdt_add(xTaskGetCurrentTaskHandle());
-  }
-#endif
 }
 
 void EpubReader::set_state_section(uint16_t current_section) {

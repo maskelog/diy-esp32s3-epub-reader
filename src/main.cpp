@@ -20,6 +20,7 @@
 #include "EpubList/EpubToc.h"
 #include "EpubList/State.h"
 #include "RubbishHtmlParser/RubbishHtmlParser.h"
+#include "TaskWdtGuard.h"
 #include "ZipFile/ZipFile.h"
 
 #ifdef BOARD_TYPE_M5_PAPER
@@ -199,8 +200,9 @@ void handleEpub(Renderer *renderer, UIAction action)
     stop_wifi_uploader(renderer, false);
 #endif
 
-  esp_err_t wdt_err = esp_task_wdt_delete(xTaskGetCurrentTaskHandle());
-  bool was_subscribed = (wdt_err == ESP_OK);
+  // Suspend watchdog subscription for the whole handler; restored
+  // automatically on every return path.
+  TaskWdtGuard wdt_guard;
 
   if (!reader)
   {
@@ -223,7 +225,6 @@ void handleEpub(Renderer *renderer, UIAction action)
     {
       ESP_LOGE(TAG, ">>> EpubReader::load() FAILED!");
       delete reader; reader = nullptr;
-      if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
       return;
     }
     ESP_LOGE(TAG, ">>> EpubReader::load() SUCCESS");
@@ -244,7 +245,6 @@ void handleEpub(Renderer *renderer, UIAction action)
     delete reader; reader = nullptr;
     if (!epub_list) epub_list = new EpubList(renderer, epub_list_state);
     handleEpubList(renderer, NONE, true);
-    if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     return;
   case NONE:
   default:
@@ -257,7 +257,6 @@ void handleEpub(Renderer *renderer, UIAction action)
   ESP_LOGE(TAG, ">>> Page rendering complete");
   vTaskDelay(10);
 
-  if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
   ESP_LOGE(TAG, "<<< handleEpub END");
 }
 
@@ -265,8 +264,9 @@ void handleEpub(Renderer *renderer, UIAction action)
 
 void handleEpubTableContents(Renderer *renderer, UIAction action, bool needs_redraw)
 {
-  esp_err_t wdt_err = esp_task_wdt_delete(xTaskGetCurrentTaskHandle());
-  bool was_subscribed = (wdt_err == ESP_OK);
+  // Suspend watchdog subscription for the whole handler; restored
+  // automatically on every return path.
+  TaskWdtGuard wdt_guard;
 
   if (!contents)
   {
@@ -291,11 +291,9 @@ void handleEpubTableContents(Renderer *renderer, UIAction action, bool needs_red
       ESP_LOGE(TAG, "Failed to load EPUB from TOC selection");
       delete reader; reader = nullptr;
       ui_state = SELECTING_TABLE_CONTENTS;
-      if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
       return;
     }
     delete contents; contents = nullptr;
-    if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     handleEpub(renderer, NONE);
     return;
   case NONE:
@@ -304,7 +302,6 @@ void handleEpubTableContents(Renderer *renderer, UIAction action, bool needs_red
   }
 
   contents->render();
-  if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
 }
 
 // ── handleEpubList ────────────────────────────────────────────────────────
@@ -353,8 +350,9 @@ void handleEpubList(Renderer *renderer, UIAction action, bool needs_redraw)
 
 void handleUserInteraction(Renderer *renderer, UIAction ui_action, bool needs_redraw)
 {
-  esp_err_t wdt_err = esp_task_wdt_delete(xTaskGetCurrentTaskHandle());
-  bool was_subscribed = (wdt_err == ESP_OK);
+  // Suspend watchdog subscription for the whole handler; restored
+  // automatically on every return path.
+  TaskWdtGuard wdt_guard;
   ESP_LOGE(TAG, ">>> handleUserInteraction START: action=%d, redraw=%d", ui_action, needs_redraw);
 
   // Toggle status bar while reading
@@ -364,7 +362,6 @@ void handleUserInteraction(Renderer *renderer, UIAction ui_action, bool needs_re
     save_app_settings(renderer);
     handleEpub(renderer, NONE);
     show_status_bar_toast(renderer, status_bar_visible ? "Status bar ON" : "Status bar OFF");
-    if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     return;
   }
 
@@ -373,7 +370,6 @@ void handleUserInteraction(Renderer *renderer, UIAction ui_action, bool needs_re
   {
     ui_state = READING_MENU;
     open_reader_menu(renderer, true);
-    if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     return;
   }
 
@@ -403,7 +399,6 @@ void handleUserInteraction(Renderer *renderer, UIAction ui_action, bool needs_re
   }
 
   ESP_LOGE(TAG, "<<< handleUserInteraction END");
-  if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
 }
 
 // ── setup / loop ──────────────────────────────────────────────────────────
@@ -412,8 +407,9 @@ void setup()
 {
   set_cpu_active_mode();
 
-  esp_err_t wdt_err = esp_task_wdt_delete(xTaskGetCurrentTaskHandle());
-  bool was_subscribed = (wdt_err == ESP_OK);
+  // Suspend watchdog subscription for the whole setup; restored
+  // automatically when setup() returns.
+  TaskWdtGuard wdt_guard;
 
   board = Board::factory();
   board->power_up();
@@ -490,7 +486,6 @@ void setup()
   touch_controls->render(renderer);
   renderer->flush_display();
 
-  if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
   set_cpu_reading_idle_mode();
   g_last_interaction_us = esp_timer_get_time();
   ESP_LOGE(TAG, ">>> Setup complete!");

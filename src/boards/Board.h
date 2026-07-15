@@ -40,6 +40,7 @@ public:
   // a dummy implementation that does nothing
   virtual TouchControls *get_touch_controls(Renderer *renderer, QueueHandle_t ui_queue);
 
-  // factory method to create a new instance of the board - now always returns a PaperS3
+  // factory method to create a new instance of the board - returns the board
+  // selected by the BOARD_TYPE_* build flag (e.g. M5Paper or PaperS3)
   static Board *factory();
 };

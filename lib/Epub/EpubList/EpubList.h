@@ -31,6 +31,8 @@ private:
   std::vector<TextBlock *> m_title_blocks;
 
   bool load_index(const char *books_path, const char *index_path);
+  void render_grid_page(int start_index, int items_per_page, int current_page, int content_height, int page_width);
+  void render_list_page(int start_index, int current_page, int content_height, int page_width);
 
 public:
   EpubList(Renderer *renderer, EpubListState &state) : renderer(renderer), state(state)

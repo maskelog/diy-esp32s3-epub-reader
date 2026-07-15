@@ -3,6 +3,7 @@
 #include "AppState.h"
 #include "Renderer/Renderer.h"
 #include "ZipFile/ZipFile.h"
+#include "TaskWdtGuard.h"
 #include <esp_log.h>
 #include <esp_random.h>
 #include <esp_task_wdt.h>
@@ -22,6 +23,25 @@
 #endif
 
 static const char *TAG = "SleepScreen";
+
+// Maximum size of a book cover image loaded for the sleep screen.
+static const size_t kMaxSleepCoverBytes = 600 * 1024;
+
+#ifdef BOARD_TYPE_M5_PAPER
+// Full e-ink "flash clear" (white then black) to remove ghosting before
+// drawing the sleep image.
+static void epd_flash_clear()
+{
+  M5.Display.setEpdMode(epd_mode_t::epd_quality);
+  M5.Display.fillScreen(TFT_WHITE);
+  M5.Display.display();
+  M5.Display.waitDisplay();
+
+  M5.Display.fillScreen(TFT_BLACK);
+  M5.Display.display();
+  M5.Display.waitDisplay();
+}
+#endif
 
 // ── Path helper ───────────────────────────────────────────────────────────
 
@@ -103,8 +123,9 @@ static int find_last_open_book_index()
 
 static void show_sleep_cover(Renderer *renderer)
 {
-  esp_err_t wdt_err = esp_task_wdt_delete(xTaskGetCurrentTaskHandle());
-  bool was_subscribed = (wdt_err == ESP_OK);
+  // Suspend watchdog subscription while loading/drawing the cover; restored
+  // automatically on every return path.
+  TaskWdtGuard wdt_guard;
 
   int book_index = -1;
   if (epub_list_state.num_epubs > 0)
@@ -118,14 +139,12 @@ static void show_sleep_cover(Renderer *renderer)
 
   if (book_index < 0)
   {
-    if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     return;
   }
 
   EpubListItem &item = epub_list_state.epub_list[book_index];
   if (item.cover_path[0] == '\0')
   {
-    if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     return;
   }
   ESP_LOGE(TAG, "Sleep cover path: %s", item.cover_path);
@@ -149,7 +168,6 @@ static void show_sleep_cover(Renderer *renderer)
   ctx.done = xSemaphoreCreateBinary();
   if (!ctx.done)
   {
-    if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     return;
   }
 
@@ -161,7 +179,7 @@ static void show_sleep_cover(Renderer *renderer)
     size_t cover_size = 0;
     bool size_ok = zip.get_file_uncompressed_size(ctx->cover_path.c_str(), &cover_size);
     ESP_LOGE("SleepScreen", "Sleep cover task: size_ok=%d, size=%zu", size_ok ? 1 : 0, cover_size);
-    if (size_ok && cover_size > 0 && cover_size <= (600 * 1024))
+    if (size_ok && cover_size > 0 && cover_size <= kMaxSleepCoverBytes)
     {
       size_t image_data_size = 0;
       uint8_t *image_data = zip.read_file_to_memory(ctx->cover_path.c_str(), &image_data_size);
@@ -179,7 +197,7 @@ static void show_sleep_cover(Renderer *renderer)
     }
     else
     {
-      ESP_LOGE("SleepScreen", "Sleep cover task: FAILED size check (size=%zu, limit=600KB)", cover_size);
+      ESP_LOGE("SleepScreen", "Sleep cover task: FAILED size check (size=%zu, limit=%zu)", cover_size, kMaxSleepCoverBytes);
     }
     xSemaphoreGive(ctx->done);
     vTaskDelete(nullptr);
@@ -192,7 +210,6 @@ static void show_sleep_cover(Renderer *renderer)
   {
     ESP_LOGE(TAG, "Sleep cover: FAILED to create task");
     vSemaphoreDelete(ctx.done);
-    if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     return;
   }
 
@@ -205,14 +222,7 @@ static void show_sleep_cover(Renderer *renderer)
     ESP_LOGE(TAG, "Sleep cover bytes: %zu", ctx.size);
 
 #ifdef BOARD_TYPE_M5_PAPER
-    M5.Display.setEpdMode(epd_mode_t::epd_quality);
-    M5.Display.fillScreen(TFT_WHITE);
-    M5.Display.display();
-    M5.Display.waitDisplay();
-
-    M5.Display.fillScreen(TFT_BLACK);
-    M5.Display.display();
-    M5.Display.waitDisplay();
+    epd_flash_clear();
 
     bool is_jpeg = (ctx.size > 2 && ctx.data[0] == 0xFF && ctx.data[1] == 0xD8);
     bool is_png  = (ctx.size > 8 && ctx.data[0] == 0x89 && ctx.data[1] == 0x50 &&
@@ -273,7 +283,6 @@ static void show_sleep_cover(Renderer *renderer)
   }
 
   if (ctx.data) free(ctx.data);
-  if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
 }
 
 // ── show_sleep_image ──────────────────────────────────────────────────────
@@ -301,33 +310,25 @@ void show_sleep_image(Renderer *renderer)
     const char *sleep_image_path = "/Sleep/bg.png";
     ESP_LOGE(TAG, "Displaying custom sleep image from SD: %s", sleep_image_path);
 
-    esp_err_t wdt_err = esp_task_wdt_delete(xTaskGetCurrentTaskHandle());
-    bool was_subscribed = (wdt_err == ESP_OK);
+    // Suspend watchdog subscription while loading/drawing the custom image;
+    // restored automatically on every return path.
+    TaskWdtGuard wdt_guard;
 
 #ifdef BOARD_TYPE_M5_PAPER
     if (!SD.exists(sleep_image_path))
     {
       ESP_LOGW(TAG, "Sleep image not found at %s, falling back to cover", sleep_image_path);
-      if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
       show_sleep_cover(renderer);
       return;
     }
 
-    M5.Display.setEpdMode(epd_mode_t::epd_quality);
-    M5.Display.fillScreen(TFT_WHITE);
-    M5.Display.display();
-    M5.Display.waitDisplay();
-
-    M5.Display.fillScreen(TFT_BLACK);
-    M5.Display.display();
-    M5.Display.waitDisplay();
+    epd_flash_clear();
 
     File sleep_fp = SD.open(sleep_image_path, FILE_READ);
     if (!sleep_fp || sleep_fp.size() == 0)
     {
       if (sleep_fp) sleep_fp.close();
       ESP_LOGW(TAG, "Failed to open sleep image: %s", sleep_image_path);
-      if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
       show_sleep_cover(renderer);
       return;
     }
@@ -340,7 +341,6 @@ void show_sleep_image(Renderer *renderer)
     {
       sleep_fp.close();
       ESP_LOGW(TAG, "OOM for sleep image (%zu bytes)", sleep_size);
-      if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
       show_sleep_cover(renderer);
       return;
     }
@@ -354,15 +354,11 @@ void show_sleep_image(Renderer *renderer)
     M5.Display.display();
     M5.Display.waitDisplay();
     ESP_LOGE(TAG, "drawPng result: %s", success ? "SUCCESS" : "FAILED");
-    if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     if (!success)
     {
       ESP_LOGW(TAG, "Failed to draw custom sleep image, falling back to cover");
       show_sleep_cover(renderer);
     }
-#else
-    (void)was_subscribed;
-    if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
 #endif
     return;
   }
@@ -371,21 +367,15 @@ void show_sleep_image(Renderer *renderer)
   if (sleep_image_mode != SLEEP_IMAGE_RANDOM)
     return;
 
-  esp_err_t wdt_err = esp_task_wdt_delete(xTaskGetCurrentTaskHandle());
-  bool was_subscribed = (wdt_err == ESP_OK);
+  // Suspend watchdog subscription while picking/drawing a random image;
+  // restored automatically on every return path.
+  TaskWdtGuard wdt_guard;
 
-  const char *pics_dir = nullptr;
-  DIR *dir = nullptr;
-  const char *candidates[] = {"/sd/pic"};
-  for (int i = 0; i < 1; i++)
-  {
-    dir = opendir(candidates[i]);
-    if (dir) { pics_dir = candidates[i]; break; }
-  }
+  const char *pics_dir = "/sd/pic";
+  DIR *dir = opendir(pics_dir);
   if (!dir)
   {
     ESP_LOGW(TAG, "Sleep image directory not found");
-    if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     show_sleep_cover(renderer);
     return;
   }
@@ -424,7 +414,6 @@ void show_sleep_image(Renderer *renderer)
   if (image_count == 0 || selected_path[0] == '\0')
   {
     ESP_LOGW(TAG, "No image files found in %s", pics_dir);
-    if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     show_sleep_cover(renderer);
     return;
   }
@@ -432,7 +421,6 @@ void show_sleep_image(Renderer *renderer)
   FILE *fp = fopen(selected_path, "rb");
   if (!fp)
   {
-    if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     show_sleep_cover(renderer);
     return;
   }
@@ -443,7 +431,6 @@ void show_sleep_image(Renderer *renderer)
   if (size <= 0)
   {
     fclose(fp);
-    if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     show_sleep_cover(renderer);
     return;
   }
@@ -453,7 +440,6 @@ void show_sleep_image(Renderer *renderer)
   {
     fclose(fp);
     ESP_LOGW(TAG, "Failed to allocate memory for sleep image");
-    if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     show_sleep_cover(renderer);
     return;
   }
@@ -463,7 +449,6 @@ void show_sleep_image(Renderer *renderer)
   if (bytes_read != (size_t)size)
   {
     free(data);
-    if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     show_sleep_cover(renderer);
     return;
   }
@@ -478,7 +463,6 @@ void show_sleep_image(Renderer *renderer)
   if (!success)
   {
     ESP_LOGW(TAG, "Failed to decode sleep image, falling back to cover");
-    if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     show_sleep_cover(renderer);
     return;
   }
@@ -491,7 +475,6 @@ void show_sleep_image(Renderer *renderer)
   if (!can_render || img_w <= 0 || img_h <= 0)
   {
     free(data);
-    if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     show_sleep_cover(renderer);
     return;
   }
@@ -509,6 +492,4 @@ void show_sleep_image(Renderer *renderer)
   vTaskDelay(1);
   renderer->flush_display();
 #endif
-
-  if (was_subscribed) esp_task_wdt_add(xTaskGetCurrentTaskHandle());
 }

@@ -1,5 +1,4 @@
 #include <cstring>
-#include <cstring>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -294,7 +293,7 @@ bool Epub::load_with_task(size_t stack_size_bytes)
 {
 #ifdef UNIT_TEST
   (void)stack_size_bytes;
-  return epub_load_internal(this);
+  return load_internal();
 #else
   struct LoadContext
   {
@@ -348,7 +347,7 @@ const std::string &Epub::get_cover_image_item()
   return m_cover_image_item;
 }
 
-std::string normalise_path(const std::string &path)
+static std::string normalise_path(const std::string &path)
 {
   std::vector<std::string> components;
   std::string component;

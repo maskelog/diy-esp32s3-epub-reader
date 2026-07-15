@@ -67,55 +67,91 @@ static size_t zip_extract_callback(void *opaque, mz_uint64 file_ofs, const void 
   return to_copy;
 }
 
+namespace
+{
+// RAII wrapper owning the zip file handle and the miniz archive state
+struct ZipArchive
+{
+  File fp;
+  mz_zip_archive *zip = nullptr;
+  bool initialized = false;
+
+  bool open(const char *zip_path)
+  {
+    fp = SD.open(zip_path, FILE_READ);
+    if (!fp)
+    {
+      ESP_LOGE(TAG, "Failed to open zip file %s", zip_path);
+      return false;
+    }
+    zip = (mz_zip_archive *)calloc(1, sizeof(mz_zip_archive));
+    if (!zip)
+    {
+      ESP_LOGE(TAG, "Failed to allocate zip archive");
+      return false;
+    }
+    zip->m_pRead = sd_read_callback;
+    zip->m_pIO_opaque = &fp;
+    if (!mz_zip_reader_init(zip, fp.size(), 0))
+    {
+      ESP_LOGE(TAG, "mz_zip_reader_init_mem() failed!\n");
+      ESP_LOGE(TAG, "Error %s\n", mz_zip_get_error_string(zip->m_last_error));
+      return false;
+    }
+    initialized = true;
+    return true;
+  }
+
+  bool stat_file(const char *filename, mz_uint32 *file_index, mz_zip_archive_file_stat *file_stat, bool log_missing)
+  {
+    if (!mz_zip_reader_locate_file_v2(zip, filename, nullptr, 0, file_index))
+    {
+      if (log_missing)
+      {
+        ESP_LOGE(TAG, "Could not find file %s", filename);
+      }
+      return false;
+    }
+    if (!mz_zip_reader_file_stat(zip, *file_index, file_stat))
+    {
+      ESP_LOGE(TAG, "mz_zip_reader_file_stat() failed!\n");
+      ESP_LOGE(TAG, "Error %s\n", mz_zip_get_error_string(zip->m_last_error));
+      return false;
+    }
+    return true;
+  }
+
+  ~ZipArchive()
+  {
+    if (initialized)
+    {
+      mz_zip_reader_end(zip);
+    }
+    if (zip)
+    {
+      free(zip);
+    }
+    if (fp)
+    {
+      fp.close();
+    }
+  }
+};
+} // namespace
+
 // read a file from the zip file allocating the required memory for the data
 uint8_t *ZipFile::read_file_to_memory(const char *filename, size_t *size)
 {
-  File fp = SD.open(m_filename.c_str(), FILE_READ);
-  if (!fp)
+  ZipArchive archive;
+  if (!archive.open(m_filename.c_str()))
   {
-    ESP_LOGE(TAG, "Failed to open zip file %s", m_filename.c_str());
     return nullptr;
   }
-  size_t file_size = fp.size();
-
-  // open up the epub file using miniz
-  mz_zip_archive *zip_archive = (mz_zip_archive *)calloc(1, sizeof(mz_zip_archive));
-  if (!zip_archive)
-  {
-    ESP_LOGE(TAG, "Failed to allocate zip archive");
-    fp.close();
-    return nullptr;
-  }
-  zip_archive->m_pRead = sd_read_callback;
-  zip_archive->m_pIO_opaque = &fp;
-  bool status = mz_zip_reader_init(zip_archive, file_size, 0);
-  if (!status)
-  {
-    ESP_LOGE(TAG, "mz_zip_reader_init_mem() failed!\n");
-    ESP_LOGE(TAG, "Error %s\n", mz_zip_get_error_string(zip_archive->m_last_error));
-    free(zip_archive);
-    fp.close();
-    return nullptr;
-  }
-  // find the file
+  // find the file and get its size - we do this all manually so we can add a null terminator to any strings
   mz_uint32 file_index = 0;
-  if (!mz_zip_reader_locate_file_v2(zip_archive, filename, nullptr, 0, &file_index))
-  {
-    ESP_LOGE(TAG, "Could not find file %s", filename);
-    mz_zip_reader_end(zip_archive);
-    free(zip_archive);
-    fp.close();
-    return nullptr;
-  }
-  // get the file size - we do this all manually so we can add a null terminator to any strings
   mz_zip_archive_file_stat file_stat;
-  if (!mz_zip_reader_file_stat(zip_archive, file_index, &file_stat))
+  if (!archive.stat_file(filename, &file_index, &file_stat, true))
   {
-    ESP_LOGE(TAG, "mz_zip_reader_file_stat() failed!\n");
-    ESP_LOGE(TAG, "Error %s\n", mz_zip_get_error_string(zip_archive->m_last_error));
-    mz_zip_reader_end(zip_archive);
-    free(zip_archive);
-    fp.close();
     return nullptr;
   }
   // allocate memory for the file (optionally in PSRAM)
@@ -129,8 +165,6 @@ uint8_t *ZipFile::read_file_to_memory(const char *filename, size_t *size)
   if (!file_data)
   {
     ESP_LOGE(TAG, "Failed to allocate memory for %s\n", file_stat.m_filename);
-    mz_zip_reader_end(zip_archive);
-    fp.close();
     return nullptr;
   }
   ZipExtractContext ctx = {
@@ -138,21 +172,13 @@ uint8_t *ZipFile::read_file_to_memory(const char *filename, size_t *size)
       .size = uncomp_size,
       .yield_bytes = 0,
   };
-  status = mz_zip_reader_extract_to_callback(zip_archive, file_index, zip_extract_callback, &ctx, 0);
-  if (!status)
+  if (!mz_zip_reader_extract_to_callback(archive.zip, file_index, zip_extract_callback, &ctx, 0))
   {
     ESP_LOGE(TAG, "mz_zip_reader_extract_to_callback() failed!\n");
-    ESP_LOGE(TAG, "Error %s\n", mz_zip_get_error_string(zip_archive->m_last_error));
+    ESP_LOGE(TAG, "Error %s\n", mz_zip_get_error_string(archive.zip->m_last_error));
     free(file_data);
-    mz_zip_reader_end(zip_archive);
-    free(zip_archive);
-    fp.close();
     return nullptr;
   }
-  // Close the archive, freeing any resources it was using
-  mz_zip_reader_end(zip_archive);
-  free(zip_archive);
-  fp.close();
   // return the size if required
   if (size)
   {
@@ -168,137 +194,17 @@ bool ZipFile::get_file_uncompressed_size(const char *filename, size_t *size)
     return false;
   }
   *size = 0;
-  File fp = SD.open(m_filename.c_str(), FILE_READ);
-  if (!fp)
+  ZipArchive archive;
+  if (!archive.open(m_filename.c_str()))
   {
-    ESP_LOGE(TAG, "Failed to open zip file %s", m_filename.c_str());
     return false;
   }
-  size_t file_size = fp.size();
-
-  mz_zip_archive *zip_archive = (mz_zip_archive *)calloc(1, sizeof(mz_zip_archive));
-  if (!zip_archive)
-  {
-    ESP_LOGE(TAG, "Failed to allocate zip archive");
-    fp.close();
-    return false;
-  }
-  zip_archive->m_pRead = sd_read_callback;
-  zip_archive->m_pIO_opaque = &fp;
-  bool status = mz_zip_reader_init(zip_archive, file_size, 0);
-  if (!status)
-  {
-    ESP_LOGE(TAG, "mz_zip_reader_init_mem() failed!\n");
-    ESP_LOGE(TAG, "Error %s\n", mz_zip_get_error_string(zip_archive->m_last_error));
-    free(zip_archive);
-    fp.close();
-    return false;
-  }
-
   mz_uint32 file_index = 0;
-  if (!mz_zip_reader_locate_file_v2(zip_archive, filename, nullptr, 0, &file_index))
-  {
-    mz_zip_reader_end(zip_archive);
-    free(zip_archive);
-    fp.close();
-    return false;
-  }
-
   mz_zip_archive_file_stat file_stat;
-  if (!mz_zip_reader_file_stat(zip_archive, file_index, &file_stat))
+  if (!archive.stat_file(filename, &file_index, &file_stat, false))
   {
-    ESP_LOGE(TAG, "mz_zip_reader_file_stat() failed!\n");
-    ESP_LOGE(TAG, "Error %s\n", mz_zip_get_error_string(zip_archive->m_last_error));
-    mz_zip_reader_end(zip_archive);
-    free(zip_archive);
-    fp.close();
     return false;
   }
-
   *size = file_stat.m_uncomp_size;
-  mz_zip_reader_end(zip_archive);
-  free(zip_archive);
-  fp.close();
   return true;
-}
-
-bool ZipFile::read_file_to_file(const char *filename, const char *dest)
-{
-  File fp = SD.open(m_filename.c_str(), FILE_READ);
-  if (!fp)
-  {
-    ESP_LOGE(TAG, "Failed to open zip file %s", m_filename.c_str());
-    return false;
-  }
-  size_t file_size = fp.size();
-
-  mz_zip_archive *zip_archive = (mz_zip_archive *)calloc(1, sizeof(mz_zip_archive));
-  if (!zip_archive)
-  {
-    ESP_LOGE(TAG, "Failed to allocate zip archive");
-    fp.close();
-    return false;
-  }
-  zip_archive->m_pRead = sd_read_callback;
-  zip_archive->m_pIO_opaque = &fp;
-  bool status = mz_zip_reader_init(zip_archive, file_size, 0);
-  if (!status)
-  {
-    ESP_LOGE(TAG, "mz_zip_reader_init_mem() failed!\n");
-    ESP_LOGE(TAG, "Error %s\n", mz_zip_get_error_string(zip_archive->m_last_error));
-    free(zip_archive);
-    fp.close();
-    return false;
-  }
-  // Run through the archive and find the requiested file
-  for (int i = 0; i < (int)mz_zip_reader_get_num_files(zip_archive); i++)
-  {
-    mz_zip_archive_file_stat file_stat;
-    if (!mz_zip_reader_file_stat(zip_archive, i, &file_stat))
-    {
-      ESP_LOGE(TAG, "mz_zip_reader_file_stat() failed!\n");
-      ESP_LOGE(TAG, "Error %s\n", mz_zip_get_error_string(zip_archive->m_last_error));
-      mz_zip_reader_end(zip_archive);
-      free(zip_archive);
-      fp.close();
-      return false;
-    }
-    // is this the file we're looking for?
-    if (strcmp(filename, file_stat.m_filename) == 0)
-    {
-      ESP_LOGI(TAG, "Extracting %s\n", file_stat.m_filename);
-      // since we are using the memory based reader, we need to extract to memory first
-      size_t uncomp_size;
-      void *p = mz_zip_reader_extract_to_heap(zip_archive, i, &uncomp_size, 0);
-      if (!p)
-      {
-        ESP_LOGE(TAG, "mz_zip_reader_extract_to_heap() failed\n");
-        mz_zip_reader_end(zip_archive);
-        free(zip_archive);
-        fp.close();
-        return false;
-      }
-      File dest_fp = SD.open(dest, FILE_WRITE);
-      if (!dest_fp)
-      {
-        ESP_LOGE(TAG, "Failed to open destination file %s", dest);
-        mz_free(p);
-        mz_zip_reader_end(zip_archive);
-        free(zip_archive);
-        fp.close();
-        return false;
-      }
-      dest_fp.write((uint8_t *)p, uncomp_size);
-      dest_fp.close();
-      mz_free(p);
-      mz_zip_reader_end(zip_archive);
-      free(zip_archive);
-      fp.close();
-      return true;
-    }
-  }
-  mz_zip_reader_end(zip_archive);
-  free(zip_archive);
-  fp.close();
-  return false;
 }
