@@ -442,13 +442,10 @@ void EpubReader::render()
   // slow); restored automatically on every return path.
   TaskWdtGuard wdt_guard;
 
-  vTaskDelay(10);
-
   if (!parser)
   {
     ESP_LOGI(TAG, "Parser not found, parsing and laying out section");
     parse_and_layout_current_section();
-    vTaskDelay(10);
   }
   if (!parser)
   {
@@ -457,8 +454,6 @@ void EpubReader::render()
   }
 
   ESP_LOGI(TAG, "Rendering page %d of %d", state.current_page, parser->get_page_count());
-
-  vTaskDelay(10);
 
 #ifndef UNIT_TEST
   RenderTaskContext *ctx = new RenderTaskContext();
@@ -494,8 +489,6 @@ void EpubReader::render()
 #else
   parser->render_page(state.current_page, renderer, epub);
 #endif
-
-  vTaskDelay(10);
 
   ESP_LOGI(TAG, "Page %d rendered", state.current_page);
   ESP_LOGD(TAG, "after render: %d", esp_get_free_heap_size());

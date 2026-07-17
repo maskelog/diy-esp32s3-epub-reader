@@ -40,7 +40,9 @@
 static const char *TAG = "main";
 
 static const TickType_t ACTIVE_QUEUE_WAIT_TICKS = pdMS_TO_TICKS(10);
-static const TickType_t READING_QUEUE_WAIT_TICKS = pdMS_TO_TICKS(100);
+// Touch is polled before waiting on this queue. A 100 ms wait added up to
+// 100 ms of input latency when a touch arrived just after the poll.
+static const TickType_t READING_QUEUE_WAIT_TICKS = pdMS_TO_TICKS(10);
 
 #ifdef BOARD_TYPE_M5_PAPER
 static void set_cpu_active_mode()
@@ -238,7 +240,13 @@ void handleEpub(Renderer *renderer, UIAction action)
   case DOWN:         reader->next();         break;
   case PREV_SECTION: reader->prev_section(); break;
   case NEXT_SECTION: reader->next_section(); break;
-  case REFRESH_PAGE: renderer->reset();      break;
+  case REFRESH_PAGE:
+    // Render the completed page itself with GC16. Calling reset() here would
+    // first flash a blank white frame with GC16, then send the actual page
+    // using DU, so the content the user sees would not get the quality pass.
+    renderer->clear_screen();
+    renderer->request_full_refresh();
+    break;
   case SELECT:
     ui_state = SELECTING_EPUB;
     renderer->clear_screen();
@@ -252,10 +260,8 @@ void handleEpub(Renderer *renderer, UIAction action)
   }
 
   ESP_LOGE(TAG, ">>> Rendering page via EpubReader");
-  vTaskDelay(10);
   reader->render();
   ESP_LOGE(TAG, ">>> Page rendering complete");
-  vTaskDelay(10);
 
   ESP_LOGE(TAG, "<<< handleEpub END");
 }

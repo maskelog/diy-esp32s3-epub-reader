@@ -297,6 +297,7 @@ void M5GfxRenderer::reset()
         framebuffer->pushSprite(0, 0);
         M5.Display.setEpdMode(epd_mode_t::epd_fast);
         m_refresh_count = 0;
+        m_pending_full_refresh = false;
     }
     else
     {

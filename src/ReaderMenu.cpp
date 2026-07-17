@@ -272,9 +272,12 @@ void handleReaderMenu(Renderer *renderer, UIAction action)
       switch (reader_menu_selected)
       {
       case BASIC_REFRESH:
-        // Full screen refresh to mitigate ghosting
+        // Draw the completed page with GC16. Avoid reset(), which pushes a
+        // blank GC16 frame before the page is rendered and leaves the final
+        // page update to the normal DU path.
         ui_state = READING_EPUB;
-        renderer->reset();
+        renderer->clear_screen();
+        renderer->request_full_refresh();
         if (reader) reader->render();
         break;
 

@@ -60,7 +60,7 @@ All rendering goes through a full-screen PSRAM framebuffer (`LGFX_Sprite`).
 The display is never written directly during normal reading.
 
 - **Page turns** use DU (`epd_fast`) — the fastest mode with no white flash.
-- **Every 20 page turns** a GL16 (`epd_text`) cleanup pass quietly removes
+- **Every 8 display updates** a GL16 (`epd_text`) cleanup pass removes
   residual ghosting without the visible white flash that GC16 produces.
 - **Library navigation, "Refresh screen" menu item, or waking from sleep**
   trigger a single GC16 (`epd_quality`) full-quality refresh to eliminate

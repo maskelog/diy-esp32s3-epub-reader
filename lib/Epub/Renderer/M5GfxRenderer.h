@@ -8,7 +8,7 @@
 // white flash) but still removes residual ghosting left by DU page-flips.
 // Lower value = more frequent cleanup (trades frequency for less jarring
 // appearance compared to the old epd_quality/GC16 approach).
-#define EPD_FULL_REFRESH_INTERVAL 20
+#define EPD_FULL_REFRESH_INTERVAL 8
 #endif
 
 class M5GfxRenderer : public Renderer
